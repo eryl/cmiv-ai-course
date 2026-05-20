@@ -141,7 +141,39 @@ def scatter2d(*datasets: tuple[np.ndarray, np.ndarray, str], **layout_kwargs):
     return fig
 ```
 
-### Decision boundary helper
+### Decision boundary helpers
+
+```{python}
+class LiveDecisionBoundary:
+    """FigureWidget that redraws the decision boundary live during training."""
+
+    def __init__(self, X, y, h=0.05):
+        x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+        y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+        self.xx, self.yy = np.meshgrid(
+            np.arange(x_min, x_max, h), np.arange(y_min, y_max, h)
+        )
+        self.grid = np.c_[self.xx.ravel(), self.yy.ravel()]
+        _marker = dict(color=y.tolist(), colorscale="viridis",
+                       line=dict(color="black", width=1), size=5)
+        self.fig = go.FigureWidget()
+        self.fig.add_contour(x=self.xx[0], y=self.yy[:, 0], z=np.zeros(self.xx.shape),
+                             colorscale="viridis", opacity=0.4, showscale=False,
+                             contours=dict(coloring="fill"))
+        self.fig.add_scatter(x=X[:, 0], y=X[:, 1], mode="markers", marker=_marker)
+        self.fig.update_layout(
+            showlegend=False, yaxis_scaleanchor="x",
+            xaxis=dict(showgrid=False, zeroline=False, range=[x_min, x_max]),
+            yaxis=dict(showgrid=False, zeroline=False, range=[y_min, y_max]),
+        )
+        display(self.fig)
+
+    def update(self, predict_fn):
+        """Redraw boundary. predict_fn: (n, 2) array in original space → (n,) class array."""
+        Z = predict_fn(self.grid).reshape(self.xx.shape)
+        with self.fig.batch_update():
+            self.fig.data[0].z = Z
+```
 
 ```{python}
 def plot_decision_boundary(clf, X, y, title=""):
@@ -210,7 +242,7 @@ By changing the text below (where it says `"classification"`) you can switch bet
 
 
 ```{python}
-dataset_name = "moons"
+dataset_name = "classification"
 base_X, base_y = make_dataset(dataset_name)
 
 scatter2d((base_X, base_y, f"{dataset_name.capitalize()} dataset")).show()
@@ -230,7 +262,7 @@ from sklearn.model_selection import train_test_split
 X_train_full, X_test, y_train_full, y_test = train_test_split(base_X, base_y, test_size=200, random_state=RANDOM_STATE)
 
 # We will experiment with different training set sizes. Set the variable below to choose how many training samples to use up to a maximum of 800.
-subsample_size = 10
+subsample_size = 100
 subsample_indices = rng.choice(len(X_train_full), size=subsample_size, replace=False)
 X_train = X_train_full[subsample_indices]
 y_train = y_train_full[subsample_indices]
@@ -247,7 +279,7 @@ We compare two classic sklearn classifiers on the chosen 2D dataset and visualis
 ### 4.2 Random Forest
 
 ```{python}
-rf = RandomForestClassifier(n_estimators=1, random_state=RANDOM_STATE)
+rf = RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE)
 rf.fit(X_train, y_train)
 
 print(f"Train accuracy: {accuracy_score(y_train, rf.predict(X_train)):.3f}")
@@ -274,7 +306,88 @@ plot_decision_boundary(svc, X_test_s, y_test, title="SVC (RBF kernel)").show()
 
 > **Exercise:** Try `kernel="linear"`. How does the decision boundary change? Which kernel works better on the moons dataset and why?
 
-## 5 – PyTorch MLP with Live Training Curves
+## 5 – SGD Classifier with Live Training Curves
+
+A `SGDClassifier` with `log_loss` uses the same stochastic gradient descent idea as a neural network, but with a linear decision boundary. Training with `partial_fit` lets us stream mini-batches one at a time and watch the loss curve update live — the same pattern we will use for the MLP in the next section.
+
+### 5.1 Linear SGD
+
+```{python}
+from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import log_loss
+from sklearn.utils import shuffle
+
+N_EPOCHS = 60
+
+scaler_sgd = StandardScaler().fit(X_train)
+Xs_train = scaler_sgd.transform(X_train)
+Xs_test  = scaler_sgd.transform(X_test)
+
+clf = SGDClassifier(loss="log_loss", random_state=RANDOM_STATE)
+curve = LivePlot()
+boundary = LiveDecisionBoundary(X_train, y_train)
+```
+
+```{python}
+for epoch in range(N_EPOCHS):
+    Xb, yb = shuffle(Xs_train, y_train, random_state=epoch)
+    clf.partial_fit(Xb, yb, classes=[0, 1])
+    curve.tick()
+    curve.report("train loss", log_loss(y_train, clf.predict_proba(Xs_train)))
+    curve.report("val loss",   log_loss(y_test,  clf.predict_proba(Xs_test)))
+    if epoch % 5 == 0:
+        boundary.update(lambda pts: clf.predict(scaler_sgd.transform(pts)))
+
+print(f"Train accuracy: {accuracy_score(y_train, clf.predict(Xs_train)):.3f}")
+print(f"Test  accuracy: {accuracy_score(y_test,  clf.predict(Xs_test)):.3f}")
+```
+
+### 5.2 Polynomial basis expansion — underfitting vs overfitting
+
+Applying `PolynomialFeatures` before the linear classifier gives it a nonlinear decision boundary. Low degree → underfitting; high degree → overfitting. Watch how the train/val gap changes.
+
+> **Exercise:** Try `DEGREE = 1`, `3`, and `20`. How does the decision boundary and the train/val loss gap change?
+
+```{python}
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
+
+DEGREE = 20  # try 1 (underfit) or 20 (overfit?)
+
+pipe = make_pipeline(
+    StandardScaler(),
+    PolynomialFeatures(degree=DEGREE, include_bias=False),
+    StandardScaler(),
+    SGDClassifier(loss="log_loss", random_state=RANDOM_STATE),
+)
+
+# partial_fit requires stepping through the pipeline manually
+poly_scaler  = make_pipeline(StandardScaler(),
+                              PolynomialFeatures(degree=DEGREE, include_bias=False),
+                              StandardScaler()).fit(X_train)
+Xp_train = poly_scaler.transform(X_train)
+Xp_test  = poly_scaler.transform(X_test)
+
+clf_poly = SGDClassifier(loss="log_loss", random_state=RANDOM_STATE)
+curve2 = LivePlot()
+boundary_poly = LiveDecisionBoundary(X_train, y_train)
+```
+
+```{python}
+for epoch in range(N_EPOCHS):
+    Xb, yb = shuffle(Xp_train, y_train, random_state=epoch)
+    clf_poly.partial_fit(Xb, yb, classes=[0, 1])
+    curve2.tick()
+    curve2.report("train loss", log_loss(y_train, clf_poly.predict_proba(Xp_train)))
+    curve2.report("val loss",   log_loss(y_test,  clf_poly.predict_proba(Xp_test)))
+    if epoch % 5 == 0:
+        boundary_poly.update(lambda pts: clf_poly.predict(poly_scaler.transform(pts)))
+
+print(f"Train accuracy: {accuracy_score(y_train, clf_poly.predict(Xp_train)):.3f}")
+print(f"Test  accuracy: {accuracy_score(y_test,  clf_poly.predict(Xp_test)):.3f}")
+```
+
+## 6 – PyTorch MLP with Live Training Curves
 
 Now we build a small Multi-Layer Perceptron in PyTorch and watch it train.
 
