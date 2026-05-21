@@ -37,7 +37,7 @@ import sys
 
 IN_COLAB = "google.colab" in sys.modules
 if IN_COLAB:
-    %pip install -q scikit-learn torch plotly ipywidgets
+    %pip install -q scikit-learn plotly ipywidgets
     from google.colab import output
     output.enable_custom_widget_manager()
 ```
@@ -54,68 +54,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-
-
 ```
 
-
-### Live Training Curves
-
-We will use the following class to plot training curves live as we train our models. It is backed by a Plotly `FigureWidget` and supports multiple lines, dynamic x-axis limits, and efficient updates.
-
-```{python}
-from typing import Optional
-
-import plotly.graph_objects as go
-
-class LivePlot:
-    """Interactive inline training-curve plot backed by Plotly FigureWidget."""
-
-    def __init__(self):
-        self.fig = go.FigureWidget()
-        self.plot_indices: dict[str, int] = {}
-        self.limits = [0, 0]
-        self.xs: dict[str, list] = {}
-        self.ys: dict[str, list] = {}
-        self.current_x = 0
-        display(self.fig)
-
-    def report(self, name: str, value: float):
-        """Append *value* to the line named *name* at the current time step."""
-        if name not in self.plot_indices:
-            plot_index = len(self.fig.data)
-            self.fig.add_scatter(y=[], x=[])
-            self.xs[name] = []
-            self.ys[name] = []
-            self.plot_indices[name] = plot_index
-
-        plot_index = self.plot_indices[name]
-        self.xs[name].append(self.current_x)
-        self.ys[name].append(value)
-        with self.fig.batch_update():
-            self.fig.data[plot_index].x = self.xs[name]
-            self.fig.data[plot_index].y = self.ys[name]
-            self.fig.data[plot_index].name = name
-
-    def increment(self, n_ticks: int):
-        """Extend the visible x-axis range by *n_ticks*."""
-        self.limits[1] += n_ticks
-        self.fig.update_layout(xaxis_range=self.limits)
-
-    def set_limit(self, n_ticks: int):
-        """Set the visible x-axis range to exactly *n_ticks*."""
-        self.limits[1] = n_ticks
-        self.fig.update_layout(xaxis_range=self.limits)
-
-    def tick(self, n_ticks: Optional[int] = None):
-        """Advance current time by *n_ticks* (default 1)."""
-        self.current_x += 1 if n_ticks is None else n_ticks
-```
 
 ### Scatter plot helper
 
@@ -141,60 +81,33 @@ def scatter2d(*datasets: tuple[np.ndarray, np.ndarray, str], **layout_kwargs):
     return fig
 ```
 
-### Decision boundary helpers
+### Decision boundary helper
 
 ```{python}
-class LiveDecisionBoundary:
-    """FigureWidget that redraws the decision boundary live during training."""
-
-    def __init__(self, X, y, h=0.05):
-        x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
-        y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
-        self.xx, self.yy = np.meshgrid(
-            np.arange(x_min, x_max, h), np.arange(y_min, y_max, h)
-        )
-        self.grid = np.c_[self.xx.ravel(), self.yy.ravel()]
-        _marker = dict(color=y.tolist(), colorscale="viridis",
-                       line=dict(color="black", width=1), size=5)
-        self.fig = go.FigureWidget()
-        self.fig.add_contour(x=self.xx[0], y=self.yy[:, 0], z=np.zeros(self.xx.shape),
-                             colorscale="viridis", opacity=0.4, showscale=False,
-                             contours=dict(coloring="fill"))
-        self.fig.add_scatter(x=X[:, 0], y=X[:, 1], mode="markers", marker=_marker)
-        self.fig.update_layout(
-            showlegend=False, yaxis_scaleanchor="x",
-            xaxis=dict(showgrid=False, zeroline=False, range=[x_min, x_max]),
-            yaxis=dict(showgrid=False, zeroline=False, range=[y_min, y_max]),
-        )
-        display(self.fig)
-
-    def update(self, predict_fn):
-        """Redraw boundary. predict_fn: (n, 2) array in original space → (n,) class array."""
-        Z = predict_fn(self.grid).reshape(self.xx.shape)
-        with self.fig.batch_update():
-            self.fig.data[0].z = Z
-```
-
-```{python}
-def plot_decision_boundary(clf, X, y, title=""):
+def plot_decision_boundary(clf, X_train, y_train, X_test, y_test, title=""):
     h = 0.02
-    x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
-    y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+    X_all = np.vstack([X_train, X_test])
+    x_min, x_max = X_all[:, 0].min() - 0.5, X_all[:, 0].max() + 0.5
+    y_min, y_max = X_all[:, 1].min() - 0.5, X_all[:, 1].max() + 0.5
     xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
     Z = clf.predict(np.c_[xx.ravel(), yy.ravel()]).reshape(xx.shape)
 
-    fig = go.Figure()
-    fig.add_contour(
-        x=np.arange(x_min, x_max, h),
-        y=np.arange(y_min, y_max, h),
-        z=Z, colorscale="viridis", opacity=0.4, showscale=False,
-        contours=dict(coloring="fill"),
-    )
-    fig.add_scatter(
-        x=X[:, 0], y=X[:, 1], mode="markers",
-        marker=dict(color=y.tolist(), colorscale="viridis", line=dict(color="black", width=1), size=6)
-    )
-    fig.update_layout(title=title, yaxis_scaleanchor="x", showlegend=False)
+    _contour_kw = dict(x=xx[0], y=yy[:, 0], z=Z, colorscale="viridis", opacity=0.4,
+                       showscale=False, contours=dict(coloring="fill"))
+    _marker = lambda y: dict(color=y.tolist(), colorscale="viridis",
+                             line=dict(color="black", width=1), size=6)
+
+    fig = make_subplots(rows=1, cols=2, subplot_titles=["Train", "Test"])
+    fig.add_contour(**_contour_kw, row=1, col=1)
+    fig.add_scatter(x=X_train[:, 0], y=X_train[:, 1], mode="markers",
+                    marker=_marker(y_train), row=1, col=1)
+    fig.add_contour(**_contour_kw, row=1, col=2)
+    fig.add_scatter(x=X_test[:, 0], y=X_test[:, 1], mode="markers",
+                    marker=_marker(y_test), row=1, col=2)
+    fig.update_layout(title=title, showlegend=False, height=450)
+    fig.update_xaxes(showgrid=False, zeroline=False)
+    fig.update_yaxes(showgrid=False, zeroline=False, scaleanchor="x", row=1, col=1)
+    fig.update_yaxes(showgrid=False, zeroline=False, scaleanchor="x2", row=1, col=2)
     return fig
 ```
 
@@ -263,7 +176,46 @@ X_train_full, X_test, y_train_full, y_test = train_test_split(base_X, base_y, te
 
 # We will experiment with different training set sizes. Set the variable below to choose how many training samples to use up to a maximum of 800.
 subsample_size = 100
-subsample_indices = rng.choice(len(X_train_full), size=subsample_size, replace=False)
+
+
+def _subsample(X, y, size, strategy, rng):
+    n = len(X)
+    if strategy == "random":
+        p = None
+    elif strategy == "centroid":
+        # one anchor point per class (near class mean); prob decays exponentially with distance
+        anchors = {cls: X[y == cls].mean(0) + rng.normal(0, 0.3, 2)
+                   for cls in np.unique(y)}
+        p = np.zeros(n)
+        for cls, anchor in anchors.items():
+            mask = y == cls
+            dist = np.linalg.norm(X[mask] - anchor, axis=1)
+            p[mask] = np.exp(-3 * dist)
+        p /= p.sum()
+    elif strategy == "axis-imbalanced":
+        # exponential decay along x-axis: left side sampled much more than right
+        t = (X[:, 0] - X[:, 0].min()) / (X[:, 0].max() - X[:, 0].min())
+        p = np.exp(-8 * t)
+        p /= p.sum()
+    elif strategy == "class-imbalanced":
+        classes = np.unique(y)
+        class_weight = {classes[0]: 10.0, classes[1]: 1.0}
+        p = np.array([class_weight[c] for c in y], dtype=float)
+        p /= p.sum()
+    else:
+        raise ValueError(f"Unknown strategy: {strategy!r}")
+    return rng.choice(n, size=size, replace=False, p=p)
+
+
+# Sampling strategy for the training subset.
+# "random"          – uniform random draw (baseline)
+# "centroid"        – points near an anchor point per class are more likely to be picked
+# "axis-imbalanced" – probability decays exponentially along the x-axis,
+#                     so training data is spatially skewed (simulates covariate shift)
+# "class-imbalanced"– one class is sampled ~10× more often than the other
+SAMPLING_STRATEGY = "centroid"
+subsample_rng = np.random.default_rng(RANDOM_STATE)
+subsample_indices = _subsample(X_train_full, y_train_full, subsample_size, SAMPLING_STRATEGY, subsample_rng)
 X_train = X_train_full[subsample_indices]
 y_train = y_train_full[subsample_indices]
 
@@ -271,245 +223,68 @@ scatter2d((X_train, y_train, "Training set"), (X_test, y_test, "Test set")).show
 ```
 
 
+> **Exercise:** Try different datasets with different sampling strategies and subsample sizes. How does the shape of the training data change? How might this affect the model's ability to learn a good decision boundary?
+
+
 ## 4 – Scikit-learn Classifiers
 
-We compare two classic sklearn classifiers on the chosen 2D dataset and visualise their decision boundaries.
+We compare two classic scikit learn classifiers on the chosen 2D dataset and visualise their decision boundaries.
 
 
 ### 4.2 Random Forest
 
+Random Forest is a learning algorithm that builds an ensemble of decision trees, where each tree is trained on a random subset of the data and features. The final prediction is made by averaging the predictions of all trees (for regression) or taking a majority vote (for classification). Random Forests are powerful and can capture complex nonlinear relationships in the data while being relatively robust to overfitting.
+
 ```{python}
-rf = RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE)
+rf = RandomForestClassifier(
+    n_estimators=100,    # more trees → lower variance, diminishing returns past ~100
+    max_depth=None,      # None = grow until pure leaves; lower values → underfitting
+    min_samples_leaf=1,  # higher values smooth the boundary and reduce overfitting
+    random_state=RANDOM_STATE,
+)
 rf.fit(X_train, y_train)
 
 print(f"Train accuracy: {accuracy_score(y_train, rf.predict(X_train)):.3f}")
 print(f"Test  accuracy: {accuracy_score(y_test,  rf.predict(X_test)):.3f}")
 
-plot_decision_boundary(rf, X_test, y_test, title="Random Forest").show()
+plot_decision_boundary(rf, X_train, y_train, X_test, y_test, title="Random Forest").show()
 ```
 
+
 ### 4.3 Support Vector Classifier
+
+Support Vector Classifiers is a kind of static neural network that maps data to a high-dimensional space and finds the hyperplane that best separates the classes. The `kernel` parameter controls the shape of the decision boundary: `linear` gives a straight line, while `rbf` (radial basis function) can capture more complex nonlinear boundaries. SVCs are sensitive to feature scaling, so we apply `StandardScaler` before training.
 
 ```{python}
 scaler = StandardScaler()
 X_train_s = scaler.fit_transform(X_train)
 X_test_s  = scaler.transform(X_test)
 
-svc = SVC(kernel="rbf", C=1.0)
+svc = SVC(kernel="rbf", C=1)
 svc.fit(X_train_s, y_train)
 
 print(f"Train accuracy: {accuracy_score(y_train, svc.predict(X_train_s)):.3f}")
 print(f"Test  accuracy: {accuracy_score(y_test,  svc.predict(X_test_s)):.3f}")
 
-plot_decision_boundary(svc, X_test_s, y_test, title="SVC (RBF kernel)").show()
+plot_decision_boundary(svc, X_train_s, y_train, X_test_s, y_test, title="SVC (RBF kernel)").show()
 ```
 
-> **Exercise:** Try `kernel="linear"`. How does the decision boundary change? Which kernel works better on the moons dataset and why?
 
-## 5 – SGD Classifier with Live Training Curves
+## Hyper parameters and development sets
 
-A `SGDClassifier` with `log_loss` uses the same stochastic gradient descent idea as a neural network, but with a linear decision boundary. Training with `partial_fit` lets us stream mini-batches one at a time and watch the loss curve update live — the same pattern we will use for the MLP in the next section.
-
-### 5.1 Linear SGD
-
-```{python}
-from sklearn.linear_model import SGDClassifier
-from sklearn.metrics import log_loss
-from sklearn.utils import shuffle
-
-N_EPOCHS = 60
-
-scaler_sgd = StandardScaler().fit(X_train)
-Xs_train = scaler_sgd.transform(X_train)
-Xs_test  = scaler_sgd.transform(X_test)
-
-clf = SGDClassifier(loss="log_loss", random_state=RANDOM_STATE)
-curve = LivePlot()
-boundary = LiveDecisionBoundary(X_train, y_train)
-```
-
-```{python}
-for epoch in range(N_EPOCHS):
-    Xb, yb = shuffle(Xs_train, y_train, random_state=epoch)
-    clf.partial_fit(Xb, yb, classes=[0, 1])
-    curve.tick()
-    curve.report("train loss", log_loss(y_train, clf.predict_proba(Xs_train)))
-    curve.report("val loss",   log_loss(y_test,  clf.predict_proba(Xs_test)))
-    if epoch % 5 == 0:
-        boundary.update(lambda pts: clf.predict(scaler_sgd.transform(pts)))
-
-print(f"Train accuracy: {accuracy_score(y_train, clf.predict(Xs_train)):.3f}")
-print(f"Test  accuracy: {accuracy_score(y_test,  clf.predict(Xs_test)):.3f}")
-```
-
-### 5.2 Polynomial basis expansion — underfitting vs overfitting
-
-Applying `PolynomialFeatures` before the linear classifier gives it a nonlinear decision boundary. Low degree → underfitting; high degree → overfitting. Watch how the train/val gap changes.
-
-> **Exercise:** Try `DEGREE = 1`, `3`, and `20`. How does the decision boundary and the train/val loss gap change?
-
-```{python}
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.pipeline import make_pipeline
-
-DEGREE = 20  # try 1 (underfit) or 20 (overfit?)
-
-pipe = make_pipeline(
-    StandardScaler(),
-    PolynomialFeatures(degree=DEGREE, include_bias=False),
-    StandardScaler(),
-    SGDClassifier(loss="log_loss", random_state=RANDOM_STATE),
-)
-
-# partial_fit requires stepping through the pipeline manually
-poly_scaler  = make_pipeline(StandardScaler(),
-                              PolynomialFeatures(degree=DEGREE, include_bias=False),
-                              StandardScaler()).fit(X_train)
-Xp_train = poly_scaler.transform(X_train)
-Xp_test  = poly_scaler.transform(X_test)
-
-clf_poly = SGDClassifier(loss="log_loss", random_state=RANDOM_STATE)
-curve2 = LivePlot()
-boundary_poly = LiveDecisionBoundary(X_train, y_train)
-```
-
-```{python}
-for epoch in range(N_EPOCHS):
-    Xb, yb = shuffle(Xp_train, y_train, random_state=epoch)
-    clf_poly.partial_fit(Xb, yb, classes=[0, 1])
-    curve2.tick()
-    curve2.report("train loss", log_loss(y_train, clf_poly.predict_proba(Xp_train)))
-    curve2.report("val loss",   log_loss(y_test,  clf_poly.predict_proba(Xp_test)))
-    if epoch % 5 == 0:
-        boundary_poly.update(lambda pts: clf_poly.predict(poly_scaler.transform(pts)))
-
-print(f"Train accuracy: {accuracy_score(y_train, clf_poly.predict(Xp_train)):.3f}")
-print(f"Test  accuracy: {accuracy_score(y_test,  clf_poly.predict(Xp_test)):.3f}")
-```
-
-## 6 – PyTorch MLP with Live Training Curves
-
-Now we build a small Multi-Layer Perceptron in PyTorch and watch it train.
-
-### 5.1 Model definition
-
-```{python}
-class MLP(nn.Module):
-    def __init__(self, hidden_sizes: list[int] = [16, 16]):
-        super().__init__()
-        layers = []
-        in_size = 2
-        for h in hidden_sizes:
-            layers += [nn.Linear(in_size, h), nn.ReLU()]
-            in_size = h
-        layers.append(nn.Linear(in_size, 1))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x).squeeze(-1)
-```
-
-### 5.2 Training loop
-
-```{python}
-def prepare_tensors(X_tr, X_te, y_tr, y_te):
-    sc = StandardScaler().fit(X_tr)
-    to_t = lambda a: torch.tensor(a, dtype=torch.float32)
-    return (
-        to_t(sc.transform(X_tr)), to_t(sc.transform(X_te)),
-        to_t(y_tr), to_t(y_te),
-    )
+Many machine learning functions have *hyper parameters* that control the learning process (e.g., `max_depth` for Random Forest, `kernel` for SVC). Often, these control how much *capacity* the model has to fit the data. 
+- If the capacity is too low, the model will underfit and fail to capture important patterns in the data.
+- If the capacity is too high, the model will overfit and learn spurious patterns that don't generalise to new data.
+We would like to find the right balance, but how do we choose hyper parameters if we can't evaluate on the test set? The solution is to split the training data again into a *train* and *development* set (in machine learning often confusingly referred to as the *validation set*). We can use the development set to evaluate different hyper parameter choices and pick the best one. This is called *model selection*.
 
 
-Xt_train, Xt_test, yt_train, yt_test = prepare_tensors(X_train, X_test, y_train, y_test)
-train_loader = DataLoader(TensorDataset(Xt_train, yt_train), batch_size=32, shuffle=True)
-```
-
-```{python}
-N_EPOCHS = 50
-
-model     = MLP([16, 16])
-optimizer = optim.Adam(model.parameters(), lr=1e-2)
-criterion = nn.BCEWithLogitsLoss()
-
-curve = LivePlot()
-curve.set_limit(N_EPOCHS)
-
-for epoch in range(N_EPOCHS):
-    model.train()
-    train_loss = 0.0
-    for xb, yb in train_loader:
-        optimizer.zero_grad()
-        loss = criterion(model(xb), yb)
-        loss.backward()
-        optimizer.step()
-        train_loss += loss.item() * len(xb)
-    train_loss /= len(Xt_train)
-
-    model.eval()
-    with torch.no_grad():
-        val_loss = criterion(model(Xt_test), yt_test).item()
-
-    curve.tick()
-    curve.report("train loss", train_loss)
-    curve.report("val loss",   val_loss)
-
-train_acc = ((model(Xt_train) > 0) == yt_train.bool()).float().mean().item()
-val_acc   = ((model(Xt_test)  > 0) == yt_test.bool()).float().mean().item()
-print(f"Train accuracy: {train_acc:.3f}  |  Val accuracy: {val_acc:.3f}")
-```
-
-## 6 – Overfitting and Underfitting
-
-Overfitting: the model memorises training data and fails to generalise.
-Underfitting: the model is too simple to capture the structure in the data.
-
-Both are visible in the **gap between training and validation loss**.
-
-> **Exercise:** Re-train the MLP with a very large network (e.g., `[256, 256, 256]`) and a very small one (`[2]`). Compare the training curves and decision boundaries.
-
-```{python}
-# TODO: train MLP variants and plot decision boundaries side-by-side
-# Suggested sizes to compare: [2], [16, 16], [256, 256, 256]
-```
-
-## 7 – Out-of-Distribution Data
-
-A model trained on data from one distribution can fail silently when deployed on data from a different distribution — even if the test accuracy looked great.
-
-Here we train on one region of the feature space and evaluate on another.
-
-```{python}
-# Generate in-distribution training data (left half of the moons)
-X_full, y_full = make_dataset("moons", n_samples=600)
-in_dist_mask  = X_full[:, 0] < 0.5
-ood_mask      = ~in_dist_mask
-
-X_in,  y_in  = X_full[in_dist_mask],  y_full[in_dist_mask]
-X_ood, y_ood = X_full[ood_mask],       y_full[ood_mask]
-
-fig = make_subplots(rows=1, cols=2, subplot_titles=["Training data (in-distribution)", "Test data (out-of-distribution)"])
-fig.add_scatter(x=X_in[:, 0], y=X_in[:, 1], mode="markers",
-    marker=dict(color=y_in.tolist(), colorscale="RdBu", line=dict(color="black", width=1), size=6),
-    row=1, col=1)
-fig.add_scatter(x=X_ood[:, 0], y=X_ood[:, 1], mode="markers",
-    marker=dict(color=y_ood.tolist(), colorscale="RdBu", line=dict(color="black", width=1), size=6),
-    row=1, col=2)
-fig.update_layout(showlegend=False)
-fig.show()
-```
-
-```{python}
-# TODO: train a Random Forest on X_in, evaluate on X_ood
-# Report both in-distribution and OOD accuracy and discuss the gap
-```
 
 ## Summary
 
 | Concept | Key takeaway |
 |---------|-------------|
 | Data size | More data generally reduces overfitting and improves generalisation |
-| Learning curves | The train/val gap reveals over- and underfitting |
-| Overfitting | High train, low val accuracy — model too complex or too little data |
-| Underfitting | Low train and val accuracy — model too simple |
-| Out-of-distribution | Good test accuracy does not guarantee real-world performance |
+| Train/test split | Test set must reflect production distribution to give meaningful evaluation |
+| Overfitting | High train, low test accuracy — model too complex or too little data |
+| Underfitting | Low train and test accuracy — model too simple |
+| Sampling bias | Skewed training data leads to skewed decision boundaries |

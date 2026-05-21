@@ -1,0 +1,479 @@
+---
+title: "SGD, Polynomial Features, and Neural Networks"
+description: Training dynamics, basis expansion, and MLP classifiers.
+jupyter:
+  jupytext:
+    formats: ipynb,qmd
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.19.1
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+execute:
+  eval: false
+---
+
+This lab continues from *Machine Learning Fundamentals*. We now look at models that are trained iteratively with stochastic gradient descent, watch the loss curve update live, and explore how polynomial basis expansion and neural networks handle the bias–variance trade-off.
+
+**Learning outcomes:**
+- Understand how SGD trains a model incrementally
+- Understand overfitting and underfitting through live loss curves
+- Understand how polynomial features extend a linear model
+- Build and train a small MLP in PyTorch
+
+## Setup
+
+```{python}
+# Install dependencies if running on Colab
+import sys
+
+IN_COLAB = "google.colab" in sys.modules
+if IN_COLAB:
+    %pip install -q scikit-learn torch plotly ipywidgets
+    from google.colab import output
+    output.enable_custom_widget_manager()
+```
+
+```{python}
+import math
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from sklearn import datasets
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+```
+
+### Scatter plot helper
+
+```{python}
+def scatter2d(*datasets: tuple[np.ndarray, np.ndarray, str], **layout_kwargs):
+    """Single scatter or subplot grid depending on number of (X, y, title) tuples."""
+    _marker = lambda y: dict(color=y.tolist(), colorscale="viridis",
+                             line=dict(color="black", width=1), size=5)
+    if len(datasets) == 1:
+        X, y, name = datasets[0]
+        fig = go.Figure(go.Scatter(x=X[:, 0], y=X[:, 1], mode="markers", marker=_marker(y)))
+        fig.update_layout(title=name, yaxis_scaleanchor="x", showlegend=False, **layout_kwargs)
+    else:
+        cols = 2
+        rows = math.ceil(len(datasets) / cols)
+        fig = make_subplots(rows=rows, cols=cols,
+                            subplot_titles=[name for _, _, name in datasets])
+        for i, (X, y, name) in enumerate(datasets):
+            r, c = divmod(i, cols)
+            fig.add_scatter(x=X[:, 0], y=X[:, 1], mode="markers", marker=_marker(y),
+                            row=r + 1, col=c + 1)
+        fig.update_layout(showlegend=False, height=400 * rows, **layout_kwargs)
+    return fig
+```
+
+### Live training curve
+
+```{python}
+from typing import Optional
+
+class LivePlot:
+    """Interactive inline training-curve plot backed by Plotly FigureWidget."""
+
+    def __init__(self):
+        self.fig = go.FigureWidget()
+        self.plot_indices: dict[str, int] = {}
+        self.limits = [0, 0]
+        self.xs: dict[str, list] = {}
+        self.ys: dict[str, list] = {}
+        self.current_x = 0
+        display(self.fig)
+
+    def report(self, name: str, value: float):
+        """Append *value* to the line named *name* at the current time step."""
+        if name not in self.plot_indices:
+            plot_index = len(self.fig.data)
+            self.fig.add_scatter(y=[], x=[])
+            self.xs[name] = []
+            self.ys[name] = []
+            self.plot_indices[name] = plot_index
+
+        plot_index = self.plot_indices[name]
+        self.xs[name].append(self.current_x)
+        self.ys[name].append(value)
+        with self.fig.batch_update():
+            self.fig.data[plot_index].x = self.xs[name]
+            self.fig.data[plot_index].y = self.ys[name]
+            self.fig.data[plot_index].name = name
+
+    def increment(self, n_ticks: int):
+        """Extend the visible x-axis range by *n_ticks*."""
+        self.limits[1] += n_ticks
+        self.fig.update_layout(xaxis_range=self.limits)
+
+    def set_limit(self, n_ticks: int):
+        """Set the visible x-axis range to exactly *n_ticks*."""
+        self.limits[1] = n_ticks
+        self.fig.update_layout(xaxis_range=self.limits)
+
+    def tick(self, n_ticks: Optional[int] = None):
+        """Advance current time by *n_ticks* (default 1)."""
+        self.current_x += 1 if n_ticks is None else n_ticks
+```
+
+### Live decision boundary
+
+```{python}
+class LiveDecisionBoundary:
+    """Live decision boundary plot compatible with Jupyter and Colab.
+
+    Colab doesn't support FigureWidget's kernel↔JS Comm protocol, so we use
+    an ipywidgets.Output container + clear_output redraw instead.
+    """
+
+    def __init__(self, X_train, y_train, X_test, y_test, h=0.05):
+        import ipywidgets as widgets
+        X_all = np.vstack([X_train, X_test])
+        x_min, x_max = X_all[:, 0].min() - 0.5, X_all[:, 0].max() + 0.5
+        y_min, y_max = X_all[:, 1].min() - 0.5, X_all[:, 1].max() + 0.5
+        self.xx, self.yy = np.meshgrid(
+            np.arange(x_min, x_max, h), np.arange(y_min, y_max, h)
+        )
+        self.grid = np.c_[self.xx.ravel(), self.yy.ravel()]
+        _contour_kw = dict(x=self.xx[0], y=self.yy[:, 0], z=np.zeros(self.xx.shape),
+                           colorscale="viridis", opacity=0.4, showscale=False,
+                           contours=dict(coloring="fill"))
+        _marker = lambda y: dict(color=y.tolist(), colorscale="viridis",
+                                 line=dict(color="black", width=1), size=5)
+        _axis = dict(showgrid=False, zeroline=False)
+        self._fig = make_subplots(rows=1, cols=2, subplot_titles=["Train", "Test"])
+        self._fig.add_contour(**_contour_kw, row=1, col=1)
+        self._fig.add_scatter(x=X_train[:, 0], y=X_train[:, 1], mode="markers",
+                              marker=_marker(y_train), row=1, col=1)
+        self._fig.add_contour(**_contour_kw, row=1, col=2)
+        self._fig.add_scatter(x=X_test[:, 0], y=X_test[:, 1], mode="markers",
+                              marker=_marker(y_test), row=1, col=2)
+        self._fig.update_layout(showlegend=False, height=450)
+        self._fig.update_xaxes(**_axis)
+        self._fig.update_yaxes(**_axis, scaleanchor="x",  row=1, col=1)
+        self._fig.update_yaxes(**_axis, scaleanchor="x2", row=1, col=2)
+        self._out = widgets.Output()
+        display(self._out)
+        with self._out:
+            self._fig.show()
+
+    def update(self, predict_fn):
+        """Redraw boundary. predict_fn: (n, 2) array in original space → (n,) class array."""
+        from IPython.display import clear_output
+        Z = predict_fn(self.grid).reshape(self.xx.shape)
+        self._fig.data[0].z = Z  # contour: train subplot
+        self._fig.data[2].z = Z  # contour: test subplot
+        with self._out:
+            clear_output(wait=True)
+            self._fig.show()
+```
+
+## Dataset and Data Split
+
+Same setup as in the previous notebook — change `dataset_name` and `SAMPLING_STRATEGY` to explore different scenarios.
+
+```{python}
+RANDOM_STATE = 1729
+np.random.seed(RANDOM_STATE)
+rng = np.random.default_rng(RANDOM_STATE)
+
+def make_dataset(name: str = "moons", n_samples: int = 1000, noise: float = 0.2):
+    """Return (X, y) for the chosen toy dataset."""
+    if name == "moons":
+        return datasets.make_moons(n_samples=n_samples, noise=noise, random_state=RANDOM_STATE)
+    elif name == "circles":
+        return datasets.make_circles(n_samples=n_samples, noise=noise, factor=0.5, random_state=RANDOM_STATE)
+    elif name == "blobs":
+        return datasets.make_blobs(n_samples=n_samples, centers=2, cluster_std=noise * 5, random_state=RANDOM_STATE)
+    elif name == "classification":
+        return datasets.make_classification(n_classes=2, n_samples=n_samples, n_features=2, n_redundant=0, n_informative=2, n_clusters_per_class=2, random_state=RANDOM_STATE)
+    else:
+        raise ValueError(f"Unknown dataset: {name}")
+
+
+def _subsample(X, y, size, strategy, rng):
+    n = len(X)
+    if strategy == "random":
+        p = None
+    elif strategy == "centroid":
+        # one anchor point per class (near class mean); prob decays exponentially with distance
+        anchors = {cls: X[y == cls].mean(0) + rng.normal(0, 0.3, 2)
+                   for cls in np.unique(y)}
+        p = np.zeros(n)
+        for cls, anchor in anchors.items():
+            mask = y == cls
+            dist = np.linalg.norm(X[mask] - anchor, axis=1)
+            p[mask] = np.exp(-3 * dist)
+        p /= p.sum()
+    elif strategy == "axis-imbalanced":
+        # exponential decay along x-axis: left side sampled much more than right
+        t = (X[:, 0] - X[:, 0].min()) / (X[:, 0].max() - X[:, 0].min())
+        p = np.exp(-8 * t)
+        p /= p.sum()
+    elif strategy == "class-imbalanced":
+        classes = np.unique(y)
+        class_weight = {classes[0]: 10.0, classes[1]: 1.0}
+        p = np.array([class_weight[c] for c in y], dtype=float)
+        p /= p.sum()
+    else:
+        raise ValueError(f"Unknown strategy: {strategy!r}")
+    return rng.choice(n, size=size, replace=False, p=p)
+```
+
+```{python}
+dataset_name = "classification"
+base_X, base_y = make_dataset(dataset_name)
+
+X_train_full, X_test, y_train_full, y_test = train_test_split(
+    base_X, base_y, test_size=200, random_state=RANDOM_STATE
+)
+
+subsample_size = 100
+
+# "random" / "centroid" / "axis-imbalanced" / "class-imbalanced"
+SAMPLING_STRATEGY = "random"
+subsample_rng = np.random.default_rng(RANDOM_STATE)
+subsample_indices = _subsample(X_train_full, y_train_full, subsample_size, SAMPLING_STRATEGY, subsample_rng)
+X_train = X_train_full[subsample_indices]
+y_train = y_train_full[subsample_indices]
+
+scatter2d((X_train, y_train, "Training set"), (X_test, y_test, "Test set")).show()
+```
+
+## 5 – SGD Classifier with Live Training Curves
+
+A `SGDClassifier` with `log_loss` uses the same stochastic gradient descent idea as a neural network, but with a linear decision boundary. Training with `partial_fit` lets us stream mini-batches one at a time and watch the loss curve update live — the same pattern we will use for the MLP in the next section.
+
+### 5.1 Linear SGD
+
+```{python}
+from sklearn.linear_model import SGDClassifier
+from sklearn.metrics import log_loss
+from sklearn.utils import shuffle
+
+N_EPOCHS = 60
+
+scaler_sgd = StandardScaler().fit(X_train)
+Xs_train = scaler_sgd.transform(X_train)
+Xs_test  = scaler_sgd.transform(X_test)
+
+clf = SGDClassifier(loss="log_loss", random_state=RANDOM_STATE)
+curve = LivePlot()
+boundary = LiveDecisionBoundary(X_train, y_train, X_test, y_test)
+```
+
+```{python}
+for epoch in range(N_EPOCHS):
+    Xb, yb = shuffle(Xs_train, y_train, random_state=epoch)
+    clf.partial_fit(Xb, yb, classes=[0, 1])
+    curve.tick()
+    curve.report("train loss", log_loss(y_train, clf.predict_proba(Xs_train)))
+    curve.report("val loss",   log_loss(y_test,  clf.predict_proba(Xs_test)))
+    if epoch % 5 == 0:
+        boundary.update(lambda pts: clf.predict(scaler_sgd.transform(pts)))
+
+print(f"Train accuracy: {accuracy_score(y_train, clf.predict(Xs_train)):.3f}")
+print(f"Test  accuracy: {accuracy_score(y_test,  clf.predict(Xs_test)):.3f}")
+```
+
+### 5.2 Polynomial basis expansion — underfitting vs overfitting
+
+Applying `PolynomialFeatures` before the linear classifier gives it a nonlinear decision boundary. Low degree → underfitting; high degree → overfitting. Watch how the train/val gap changes.
+
+For input $\mathbf{x} = (x_1, x_2) \in \mathbb{R}^2$, degree-$d$ expansion maps to all monomials up to degree $d$:
+
+$$\phi(\mathbf{x}) = \bigl(x_1^{i_1}\, x_2^{i_2}\bigr)_{i_1+i_2 \leq d}$$
+
+e.g. degree 2: $\phi(\mathbf{x}) = (1,\; x_1,\; x_2,\; x_1^2,\; x_1 x_2,\; x_2^2)$.
+
+```{python}
+#| eval: true
+#| echo: false
+#| warning: false
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
+
+rng_poly = np.random.default_rng(1729)
+x_data = np.linspace(0, np.pi, 8)
+y_data = np.sin(x_data) + rng_poly.normal(0, 0.2, size=len(x_data))
+x_plot = np.linspace(0, np.pi, 300)
+y_pad  = 0.3
+y_range = (min(y_data.min(), 0) - y_pad, max(y_data.max(), 1) + y_pad)
+
+degrees = [1, 2, 10]
+fig, axes = plt.subplots(1, 3, figsize=(10, 3.2), facecolor="white")
+
+for ax, deg in zip(axes, degrees):
+    coeffs = np.polyfit(x_data, y_data, deg)
+    ax.plot(x_plot, np.sin(x_plot), color="gray", lw=1.5, ls="--")
+    ax.scatter(x_data, y_data, color="steelblue", s=40, zorder=3)
+    ax.plot(x_plot, np.polyval(coeffs, x_plot), color="crimson", lw=2)
+    ax.set_title(f"Degree {deg}", fontsize=11, pad=8)
+    ax.set_ylim(y_range)
+    ax.set_facecolor("#e5ecf6")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+legend_handles = [
+    mlines.Line2D([], [], color="gray",      lw=1.5, ls="--", label="True function (sin(x))"),
+    mlines.Line2D([], [], color="steelblue", lw=0, marker="o", markersize=6, label="Observations"),
+    mlines.Line2D([], [], color="crimson",   lw=2,             label="Fitted polynomial"),
+]
+fig.legend(handles=legend_handles, loc="lower center", ncol=3,
+           bbox_to_anchor=(0.5, -0.08), frameon=False, fontsize=10)
+fig.tight_layout()
+plt.show()
+```
+
+> **Exercise:** Try `DEGREE = 1`, `3`, and `20`. How does the decision boundary and the train/val loss gap change?
+
+```{python}
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
+
+DEGREE = 20  # try 1 (underfit) or 20 (overfit?)
+
+# partial_fit requires stepping through the pipeline manually
+poly_scaler  = make_pipeline(StandardScaler(),
+                              PolynomialFeatures(degree=DEGREE, include_bias=False),
+                              StandardScaler()).fit(X_train)
+Xp_train = poly_scaler.transform(X_train)
+Xp_test  = poly_scaler.transform(X_test)
+
+clf_poly = SGDClassifier(loss="log_loss", random_state=RANDOM_STATE)
+curve2 = LivePlot()
+boundary_poly = LiveDecisionBoundary(X_train, y_train, X_test, y_test)
+```
+
+```{python}
+for epoch in range(N_EPOCHS):
+    Xb, yb = shuffle(Xp_train, y_train, random_state=epoch)
+    clf_poly.partial_fit(Xb, yb, classes=[0, 1])
+    curve2.tick()
+    curve2.report("train loss", log_loss(y_train, clf_poly.predict_proba(Xp_train)))
+    curve2.report("test loss",   log_loss(y_test,  clf_poly.predict_proba(Xp_test)))
+    if epoch % 5 == 0:
+        boundary_poly.update(lambda pts: clf_poly.predict(poly_scaler.transform(pts)))
+
+print(f"Train accuracy: {accuracy_score(y_train, clf_poly.predict(Xp_train)):.3f}")
+print(f"Test  accuracy: {accuracy_score(y_test,  clf_poly.predict(Xp_test)):.3f}")
+```
+
+## 6 – PyTorch MLP with Live Training Curves
+
+Now we build a small Multi-Layer Perceptron in PyTorch and watch it train.
+
+### 6.1 Model definition
+
+```{python}
+class MLP(nn.Module):
+    def __init__(self, hidden_sizes: list[int] = [16, 16]):
+        super().__init__()
+        layers = []
+        in_size = 2
+        for h in hidden_sizes:
+            layers += [nn.Linear(in_size, h), nn.ReLU()]
+            in_size = h
+        layers.append(nn.Linear(in_size, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+```
+
+### 6.2 Training loop
+
+```{python}
+def prepare_tensors(X_tr, X_te, y_tr, y_te):
+    sc = StandardScaler().fit(X_tr)
+    to_t = lambda a: torch.tensor(a, dtype=torch.float32)
+    return (
+        to_t(sc.transform(X_tr)), to_t(sc.transform(X_te)),
+        to_t(y_tr), to_t(y_te),
+        sc,
+    )
+
+Xt_train, Xt_test, yt_train, yt_test, mlp_scaler = prepare_tensors(X_train, X_test, y_train, y_test)
+train_loader = DataLoader(TensorDataset(Xt_train, yt_train), batch_size=32, shuffle=True)
+```
+
+```{python}
+model     = MLP([16, 16])
+optimizer = optim.Adam(model.parameters(), lr=1e-2)
+criterion = nn.BCEWithLogitsLoss()
+
+curve_mlp    = LivePlot()
+boundary_mlp = LiveDecisionBoundary(X_train, y_train, X_test, y_test)
+```
+
+```{python}
+N_EPOCHS = 50
+for epoch in range(N_EPOCHS):
+    model.train()
+    train_loss = 0.0
+    for xb, yb in train_loader:
+        optimizer.zero_grad()
+        loss = criterion(model(xb), yb)
+        loss.backward()
+        optimizer.step()
+        train_loss += loss.item() * len(xb)
+    train_loss /= len(Xt_train)
+
+    model.eval()
+    with torch.no_grad():
+        val_loss = criterion(model(Xt_test), yt_test).item()
+
+    if epoch % 5 == 0:
+        boundary_mlp.update(
+            lambda pts: model(torch.tensor(mlp_scaler.transform(pts), dtype=torch.float32))
+                        .sigmoid().detach().numpy() > 0.5
+        )
+
+    curve_mlp.tick()
+    curve_mlp.report("train loss", train_loss)
+    curve_mlp.report("test loss",   val_loss)
+
+train_acc = ((model(Xt_train) > 0) == yt_train.bool()).float().mean().item()
+val_acc   = ((model(Xt_test)  > 0) == yt_test.bool()).float().mean().item()
+print(f"Train accuracy: {train_acc:.3f}  |  Test accuracy: {val_acc:.3f}")
+```
+
+## 7 – Overfitting and Underfitting
+
+Overfitting: the model memorises training data and fails to generalise.
+Underfitting: the model is too simple to capture the structure in the data.
+
+Both are visible in the **gap between training and validation loss**.
+
+> **Exercise:** Re-train the MLP with a very large network (e.g., `[256, 256, 256]`) and a very small one (`[2]`). Compare the training curves and decision boundaries.
+
+```{python}
+# TODO: train MLP variants and plot decision boundaries side-by-side
+# Suggested sizes to compare: [2], [16, 16], [256, 256, 256]
+```
+
+## Summary
+
+| Concept | Key takeaway |
+|---------|-------------|
+| SGD | Updates weights one mini-batch at a time; loss curve reveals training dynamics |
+| Polynomial features | Extend linear models to nonlinear boundaries; high degree → overfitting |
+| Learning curves | Train/val gap is the primary signal for over- and underfitting |
+| MLP | Learns its own nonlinear features; capacity controlled by depth and width |
+| Overfitting | High train, low val accuracy — reduce capacity or add data |
+| Underfitting | Low train and val accuracy — increase capacity or reduce regularisation |
