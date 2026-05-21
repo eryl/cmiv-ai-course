@@ -84,9 +84,8 @@ def scatter2d(*datasets: tuple[np.ndarray, np.ndarray, str], **layout_kwargs):
 ### Decision boundary helper
 
 ```{python}
-def plot_decision_boundary(clf, X_train, y_train, X_test, y_test, title=""):
-    h = 0.02
-    X_all = np.vstack([X_train, X_test])
+def plot_decision_boundary(clf, *datasets: tuple[np.ndarray, np.ndarray, str], h=0.02):
+    X_all = np.vstack([X for X, _, _ in datasets])
     x_min, x_max = X_all[:, 0].min() - 0.5, X_all[:, 0].max() + 0.5
     y_min, y_max = X_all[:, 1].min() - 0.5, X_all[:, 1].max() + 0.5
     xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
@@ -97,17 +96,18 @@ def plot_decision_boundary(clf, X_train, y_train, X_test, y_test, title=""):
     _marker = lambda y: dict(color=y.tolist(), colorscale="viridis",
                              line=dict(color="black", width=1), size=6)
 
-    fig = make_subplots(rows=1, cols=2, subplot_titles=["Train", "Test"])
-    fig.add_contour(**_contour_kw, row=1, col=1)
-    fig.add_scatter(x=X_train[:, 0], y=X_train[:, 1], mode="markers",
-                    marker=_marker(y_train), row=1, col=1)
-    fig.add_contour(**_contour_kw, row=1, col=2)
-    fig.add_scatter(x=X_test[:, 0], y=X_test[:, 1], mode="markers",
-                    marker=_marker(y_test), row=1, col=2)
-    fig.update_layout(title=title, showlegend=False, height=450)
+    cols = 2
+    rows = math.ceil(len(datasets) / cols)
+    fig = make_subplots(rows=rows, cols=cols,
+                        subplot_titles=[title for _, _, title in datasets])
+    for i, (X, y, _) in enumerate(datasets):
+        r, c = divmod(i, cols)
+        fig.add_contour(**_contour_kw, row=r + 1, col=c + 1)
+        fig.add_scatter(x=X[:, 0], y=X[:, 1], mode="markers",
+                        marker=_marker(y), row=r + 1, col=c + 1)
+    fig.update_layout(showlegend=False, height=450 * rows)
     fig.update_xaxes(showgrid=False, zeroline=False)
-    fig.update_yaxes(showgrid=False, zeroline=False, scaleanchor="x", row=1, col=1)
-    fig.update_yaxes(showgrid=False, zeroline=False, scaleanchor="x2", row=1, col=2)
+    fig.update_yaxes(showgrid=False, zeroline=False)
     return fig
 ```
 
@@ -126,59 +126,59 @@ We will use toy 2D datasets from scikit-learn so we can visualise both the data 
 ```{python}
 from sklearn import datasets
 
-RANDOM_STATE = 1729
-np.random.seed(RANDOM_STATE)
-rng = np.random.default_rng(RANDOM_STATE)
 
-def make_dataset(name: str = "moons", n_samples: int = 1000, noise: float = 0.2):
+def make_dataset(name: str = "moons", n_samples: int = 2000, noise: float = 0.2, random_state=1729):
     """Return (X, y) for the chosen toy dataset."""
+    np.random.seed(random_state)
     if name == "moons":
-        return datasets.make_moons(n_samples=n_samples, noise=noise, random_state=RANDOM_STATE)
+        return datasets.make_moons(n_samples=n_samples, noise=noise, random_state=random_state)
     elif name == "circles":
-        return datasets.make_circles(n_samples=n_samples, noise=noise, factor=0.5, random_state=RANDOM_STATE)
+        return datasets.make_circles(n_samples=n_samples, noise=noise, factor=0.5, random_state=random_state)
     elif name == "blobs":
-        return datasets.make_blobs(n_samples=n_samples, centers=2, cluster_std=noise * 5, random_state=RANDOM_STATE)
+        return datasets.make_blobs(n_samples=n_samples, centers=2, cluster_std=noise * 5, random_state=random_state)
     elif name == "classification":
-        return datasets.make_classification(n_classes=2, n_samples=n_samples, n_features=2, n_redundant=0, n_informative=2, n_clusters_per_class=2, random_state=RANDOM_STATE)
+        return datasets.make_classification(n_classes=2, n_samples=n_samples, n_features=2, n_redundant=0, n_informative=2, n_clusters_per_class=2, random_state=random_state)
     else:
         raise ValueError(f"Unknown dataset: {name}")
+
+POPULATION_SIZE = 2000
 
 dataset_names = ["moons", "circles", "blobs", "classification"]
 dataset_tuples = []
 for name in dataset_names:
-    X, y = make_dataset(name)
-    dataset_tuples.append((X, y, name.capitalize()))
+    X, y = make_dataset(name, n_samples=POPULATION_SIZE)
+    dataset_tuples.append((X, y, name))
 scatter2d(*dataset_tuples).show()
 ```
 
 By changing the text below (where it says `"classification"`) you can switch between the datasets throughout the lab. Try them all!
 
 
-```{python}
-dataset_name = "classification"
-base_X, base_y = make_dataset(dataset_name)
 
-scatter2d((base_X, base_y, f"{dataset_name.capitalize()} dataset")).show()
-```
-
-
-## 2 – Train/Test Split
+## 2 – Data sampling
 
 In machine learning, we use data to learn a model that can classify new unseen data. To do that we need training data. To keep track of how well our model is doing, we also need data to test the model on. The most common approach is to split the available data into a training set and a test set.
 
-The strategy used for splitting data impacts the reliability of our evaluation. The most common approach is to do a random split, but in some cases (e.g., time series data) we need to do a chronological split. In real-world applications, the test set should ideally reflect the distribution of data the model will encounter in production and be choses to accurately capture what you actually want to evaluate.
+Here will will simulate there being a large population of data which is unknown, and from that population we have gathered (sampled) some data. We will use the sampled data to develop our model, and also show how it would perform on the rest of the population (which we would not have access to in a real scenario). 
+
+We will split the sampled data into a training set and a test set. The training set is what we will use to train our model, and the test set is what we will use to estimate how well our model generalizes to new data (the population data).
+
+The strategy used for sampling data impacts the reliability of our evaluation. Ideally we would like the sample to be representative of the population, and a uniformly random sample is often a good choice. However, in practice we may have to deal with sampling bias, where the sampled data is not representative of the population. We will experiment with different sampling strategies here to see their effect on the performance of the models.
 
 ```{python}
 from sklearn.model_selection import train_test_split
+RANDOM_STATE = 1729
 
-
-X_train_full, X_test, y_train_full, y_test = train_test_split(base_X, base_y, test_size=200, random_state=RANDOM_STATE)
-
-# We will experiment with different training set sizes. Set the variable below to choose how many training samples to use up to a maximum of 800.
-subsample_size = 100
-
+# Datasets type for sampling population
+# "moons"           - two interleaved half-moons; nonlinear but relatively easy to learn
+# "circles"         - concentric circles; nonlinear but harder
+# "blobs"           - separated Gaussian clusters; roughly linear
+# "classification"  - random clusters with random labels; complex structure, harder to learn
+dataset_name = "moons"
+population_X, population_y = make_dataset(dataset_name, n_samples=POPULATION_SIZE, random_state=RANDOM_STATE)
 
 def _subsample(X, y, size, strategy, rng):
+    
     n = len(X)
     if strategy == "random":
         p = None
@@ -195,7 +195,7 @@ def _subsample(X, y, size, strategy, rng):
     elif strategy == "axis-imbalanced":
         # exponential decay along x-axis: left side sampled much more than right
         t = (X[:, 0] - X[:, 0].min()) / (X[:, 0].max() - X[:, 0].min())
-        p = np.exp(-8 * t)
+        p = np.exp(-10 * t)
         p /= p.sum()
     elif strategy == "class-imbalanced":
         classes = np.unique(y)
@@ -206,6 +206,8 @@ def _subsample(X, y, size, strategy, rng):
         raise ValueError(f"Unknown strategy: {strategy!r}")
     return rng.choice(n, size=size, replace=False, p=p)
 
+# We will experiment with different training set sizes. Set the variable below to choose how many training samples to use up to a maximum of 800.
+subsample_size = 500
 
 # Sampling strategy for the training subset.
 # "random"          – uniform random draw (baseline)
@@ -213,17 +215,31 @@ def _subsample(X, y, size, strategy, rng):
 # "axis-imbalanced" – probability decays exponentially along the x-axis,
 #                     so training data is spatially skewed (simulates covariate shift)
 # "class-imbalanced"– one class is sampled ~10× more often than the other
-SAMPLING_STRATEGY = "centroid"
+SAMPLING_STRATEGY = "class-imbalanced"
 subsample_rng = np.random.default_rng(RANDOM_STATE)
-subsample_indices = _subsample(X_train_full, y_train_full, subsample_size, SAMPLING_STRATEGY, subsample_rng)
-X_train = X_train_full[subsample_indices]
-y_train = y_train_full[subsample_indices]
+subsample_indices = _subsample(population_X, population_y, subsample_size, SAMPLING_STRATEGY, subsample_rng)
 
-scatter2d((X_train, y_train, "Training set"), (X_test, y_test, "Test set")).show()
+sample_X = population_X[subsample_indices]
+sample_y = population_y[subsample_indices]
+unknown_X = population_X[~np.isin(np.arange(len(population_X)), subsample_indices)]
+unknown_y = population_y[~np.isin(np.arange(len(population_y)), subsample_indices)]
+
+
+scatter2d((population_X, population_y, f"Population ({dataset_name})"), (sample_X, sample_y, f"Sampled data ({SAMPLING_STRATEGY})")).show()
 ```
 
 
 > **Exercise:** Try different datasets with different sampling strategies and subsample sizes. How does the shape of the training data change? How might this affect the model's ability to learn a good decision boundary?
+
+## Train/test split
+
+Now we will split the sampled data into a training set and a test set. The training set is what we will use to train our model, and the test set is what we will use to estimate how well our model generalizes to unseen data (the population).
+
+```{python}
+TEST_SIZE = 0.2  # Use 20% of the sampled data for testing, and the rest for training
+X_train, X_test, y_train, y_test = train_test_split(sample_X, sample_y, test_size=TEST_SIZE, random_state=RANDOM_STATE)
+scatter2d((X_train, y_train, "Train set"), (X_test, y_test, "Test set"), (population_X, population_y, f"Population ({dataset_name})")).show()
+```
 
 
 ## 4 – Scikit-learn Classifiers
@@ -244,10 +260,15 @@ rf = RandomForestClassifier(
 )
 rf.fit(X_train, y_train)
 
-print(f"Train accuracy: {accuracy_score(y_train, rf.predict(X_train)):.3f}")
-print(f"Test  accuracy: {accuracy_score(y_test,  rf.predict(X_test)):.3f}")
+train_acc = accuracy_score(y_train, rf.predict(X_train))
+test_acc = accuracy_score(y_test, rf.predict(X_test))
+population_acc = accuracy_score(population_y, rf.predict(population_X))
 
-plot_decision_boundary(rf, X_train, y_train, X_test, y_test, title="Random Forest").show()
+print(f"Train accuracy: {train_acc:.3f}")
+print(f"Test  accuracy: {test_acc:.3f}")
+print(f"Population accuracy: {population_acc:.3f}")
+
+plot_decision_boundary(rf, (X_train, y_train, f"Train (Accuracy: {train_acc:.3f})"), (X_test, y_test, f"Test (Accuracy: {test_acc:.3f})"), (population_X, population_y, f"Population (Accuracy: {population_acc:.3f})")).show()
 ```
 
 
@@ -263,20 +284,127 @@ X_test_s  = scaler.transform(X_test)
 svc = SVC(kernel="rbf", C=1)
 svc.fit(X_train_s, y_train)
 
-print(f"Train accuracy: {accuracy_score(y_train, svc.predict(X_train_s)):.3f}")
-print(f"Test  accuracy: {accuracy_score(y_test,  svc.predict(X_test_s)):.3f}")
+train_acc = accuracy_score(y_train, svc.predict(X_train_s))
+test_acc = accuracy_score(y_test,  svc.predict(X_test_s))
+population_acc = accuracy_score(population_y, svc.predict(scaler.transform(population_X)))
 
-plot_decision_boundary(svc, X_train_s, y_train, X_test_s, y_test, title="SVC (RBF kernel)").show()
+print(f"Train accuracy: {train_acc:.3f}")
+print(f"Test  accuracy: {test_acc:.3f}")
+print(f"Population accuracy: {population_acc:.3f}")
+
+plot_decision_boundary(svc, (X_train_s, y_train, f"Train (Accuracy: {train_acc:.3f})"), (X_test_s, y_test, f"Test (Accuracy: {test_acc:.3f})"), (population_X, population_y, f"Population (Accuracy: {population_acc:.3f})")).show()
 ```
 
+
+### Exercise
+> **Exercise:** Now try to change the following things in the cell where we create the subsampled dataset:
+ - `dataset_name`: "moons", "circles", "blobs", "classification"
+ - `SAMPLING_STRATEGY`: "random", "centroid", "axis-imbalanced", "class-imbalanced"
+ - `subsample_size`: any value up to the population size (2000)
+ 
+  How does this affect the decision boundary and the train/test/population accuracies for each model? Can you find a scenario where one model performs much better than the other? Why do you think that is?
 
 ## Hyper parameters and development sets
 
 Many machine learning functions have *hyper parameters* that control the learning process (e.g., `max_depth` for Random Forest, `kernel` for SVC). Often, these control how much *capacity* the model has to fit the data. 
 - If the capacity is too low, the model will underfit and fail to capture important patterns in the data.
 - If the capacity is too high, the model will overfit and learn spurious patterns that don't generalise to new data.
+
 We would like to find the right balance, but how do we choose hyper parameters if we can't evaluate on the test set? The solution is to split the training data again into a *train* and *development* set (in machine learning often confusingly referred to as the *validation set*). We can use the development set to evaluate different hyper parameter choices and pick the best one. This is called *model selection*.
 
+```{python}
+# Split the training data into a smaller training set and a development set
+DEV_SIZE = 0.2  # Use 20% of the training data for development
+X_train_sub, X_dev, y_train_sub, y_dev = train_test_split(X_train, y_train, test_size=DEV_SIZE, random_state=RANDOM_STATE)
+scatter2d((X_train_sub, y_train_sub, "Train subset"), 
+          (X_dev, y_dev, "Development set (\"validation set\")"), 
+          (X_test, y_test, "Test set"), 
+          (population_X, population_y, "Population set")).show()
+```
+
+
+### Random forest with development set
+
+```{python}
+rf = RandomForestClassifier(
+    n_estimators=1,    # More trees gives lower variance, diminishing returns past ~100
+    max_depth=1,      # High values: risk of overfitting; lower values: risk of underfitting
+    random_state=RANDOM_STATE,
+)
+rf.fit(X_train_sub, y_train_sub)
+
+train_acc = accuracy_score(y_train_sub, rf.predict(X_train_sub))
+dev_acc = accuracy_score(y_dev, rf.predict(X_dev))
+test_acc = accuracy_score(y_test, rf.predict(X_test))
+population_acc = accuracy_score(population_y, rf.predict(population_X))
+
+print(f"Train accuracy: {train_acc:.3f}")
+print(f"Development accuracy: {dev_acc:.3f}")
+
+plot_decision_boundary(rf, (X_train_sub, y_train_sub, f"Train (Accuracy: {train_acc:.3f})"), (X_dev, y_dev, f"Development (Accuracy: {dev_acc:.3f})")).show()
+```
+
+> **Exercise:** 
+> Try changing the hyper parameters of the Random Forest (`n_estimators`, `max_depth`) and see how it affects the train/dev accuracies. Can you find a scenario where the train accuracy is much higher than the development accuracy? This is a sign of overfitting. What happens to the decision boundary in this case? Can you find a scenario where both train and development accuracies are low? This is a sign of underfitting. What happens to the decision boundary in this case?
+
+Once you are happy with the hyper parameters, we can see how it performs on the test set and the population data.
+
+```{python}
+test_acc = accuracy_score(y_test, rf.predict(X_test))
+population_acc = accuracy_score(population_y, rf.predict(population_X))
+
+print(f"Test accuracy: {test_acc:.3f}")
+print(f"Population accuracy: {population_acc:.3f}")
+plot_decision_boundary(rf, (X_test, y_test, f"Test (Accuracy: {test_acc:.3f})"), (population_X, population_y, f"Population (Accuracy: {population_acc:.3f})")).show()
+```
+
+Did the performance on the test set give a good estimate of the performance on the test data? Did this in turn give a good estimate of the population performance? If not, why do you think that is? What could we do to get a better estimate of the *population* performance?
+
+### Support vector classifier with development set 
+```{python}
+scaler = StandardScaler()
+X_train_sub_s = scaler.fit_transform(X_train_sub)
+X_dev_s  = scaler.transform(X_dev)
+
+svc = SVC(
+    kernel="rbf", # "linear" gives a straight line, while "rbf" (radial basis function) can capture more complex nonlinear boundaries
+    C=1, # higher values: more complex boundary, risk of overfitting; lower values: simpler boundary, risk of underfitting
+    gamma=0.1,  # higher values: more complex boundary, risk of overfitting; lower values: simpler boundary, risk of underfitting
+)
+
+svc.fit(X_train_sub_s, y_train_sub)
+train_acc = accuracy_score(y_train_sub, svc.predict(X_train_sub_s))
+dev_acc = accuracy_score(y_dev, svc.predict(X_dev_s))
+test_acc = accuracy_score(y_test,  svc.predict(scaler.transform(X_test)))
+population_acc = accuracy_score(population_y, svc.predict(scaler.transform(population_X)))
+
+print(f"Train accuracy: {train_acc:.3f}")
+print(f"Development accuracy: {dev_acc:.3f}")
+
+plot_decision_boundary(svc, (X_train_sub_s, y_train_sub, f"Train (Accuracy: {train_acc:.3f})"), (X_dev_s, y_dev, f"Development (Accuracy: {dev_acc:.3f})")).show()
+```
+
+> **Exercise:** 
+> Try changing the hyper parameters of the Support Vector Classifier (`kernel`, `C`, `gamma`) and see how it affects the train/dev accuracies. Can you find a scenario where the train accuracy is much higher than the development accuracy? This is a sign of overfitting. What happens to the decision boundary in this case? Can you find a scenario where both train and development accuracies are low? This is a sign of underfitting. What happens to the decision boundary in this case?
+
+
+Once you are happy with the hyper parameters, we can see how it performs on the test set and the population data.
+
+```{python}
+test_acc = accuracy_score(y_test, svc.predict(scaler.transform(X_test)))
+population_acc = accuracy_score(population_y, svc.predict(scaler.transform(population_X)))
+
+print(f"Test accuracy: {test_acc:.3f}")
+print(f"Population accuracy: {population_acc:.3f}")
+plot_decision_boundary(svc, (X_test, y_test, f"Test (Accuracy: {test_acc:.3f})"), (population_X, population_y, f"Population (Accuracy: {population_acc:.3f})")).show()
+```
+
+Did the performance on the test set give a good estimate of the performance on the test data? Did this in turn give a good estimate of the population performance? If not, why do you think that is? What could we do to get a better estimate of the *population* performance?
+
+## Discussion questions
+ - How much data do we need to learn a good model? How does this depend on the problem and the model?
+ - What happens if the training data is not representative of the population? Can you find scenarios where the   test accuracy is high but the population accuracy is low? Why does this happen?
+ - How do we know if our model is overfitting or underfitting? What can we do about it?
 
 
 ## Summary
