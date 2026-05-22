@@ -1044,16 +1044,16 @@ fig_es_bd.show()
 
 ## Summary
 
-| Concept | Key takeaway | Section |
-|---------|-------------|---------|
-| MLP | Stacks linear layers + ReLU activations; `nn.Sequential` chains them | §1.1 |
-| Training loop | `zero_grad`, `backward`, `step` each mini-batch | §1.2 |
-| train/eval mode | `model.train()` enables dropout/batchnorm training behaviour; `model.eval()` disables it | §1.2, §4 |
-| Capacity | Width/depth control what the network can represent; too much leads to overfitting | §2 |
-| Train/dev/test split | Train subset used for gradient updates; dev set used to monitor training and tune hyperparameters; test set touched only for final evaluation | §1.2 |
-| Learning curves | Train/dev gap is the primary signal for over- and underfitting | §2 |
-| Learning rate | Too small: slow convergence. Too large: instability. Adam adapts per-parameter | §3 |
-| Weight decay | L2 penalty on weights; reduces overfitting by keeping weights small | §4 |
-| Dropout | Random activation masking; forces robust, distributed representations | §4 |
-| Batch norm | Normalises layer inputs; stabilises training and acts as regulariser | §4 |
-| Early stopping | Halt at best dev-loss epoch; restore saved weights for free regularisation | §4 |
+| Concept | Key takeaway | 
+|---------|-------------|
+ MLP | Stacks linear layers + ReLU activations; `nn.Sequential` chains them |
+| Training loop | `zero_grad`, `backward`, `step` each mini-batch | 
+| train/eval mode | `model.train()` enables dropout/batchnorm training behaviour; `model.eval()` disables it | 
+| Capacity | Width/depth control what the network can represent; too much leads to overfitting | 
+| Train/dev/test split | Train subset used for gradient updates; dev set used to monitor training and tune hyperparameters; test set touched only for final evaluation | 
+| Learning curves | Train/dev gap is the primary signal for over- and underfitting | 
+| Learning rate | Too small: slow convergence. Too large: instability. Adam adapts per-parameter | 
+| Weight decay | L2 penalty on weights; reduces overfitting by keeping weights small | 
+| Dropout | Random activation masking; forces robust, distributed representations | 
+| Batch norm | Normalises layer inputs; stabilises training and acts as regulariser | 
+| Early stopping | Halt at best dev-loss epoch; restore saved weights for free regularisation | 
