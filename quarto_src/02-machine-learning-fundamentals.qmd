@@ -13,6 +13,7 @@ execute:
 In this lab you will build intuition for how machine learning actually works by experimenting with 2D classification problems. We keep the data simple so you can **see** what is happening.
 
 **Learning outcomes:**
+
 - Understand how machine learning is driven by the data it is fed
 - Understand how different problems need different amounts of data
 - Understand how sampling bias can lead to skewed decision boundaries and poor generalization
@@ -280,7 +281,7 @@ Change `dataset_name`, `sampling_strategy`, and `subsample_size` below, then re-
 
 ```{python}
 dataset_name      = "moons"           # "moons" | "circles" | "blobs" | "classification"
-sampling_strategy = "missing-region"  # "random" | "missing-region" | "axis-imbalanced" | "class-imbalanced"
+sampling_strategy = "random"  # "random" | "missing-region" | "axis-imbalanced" | "class-imbalanced"
 subsample_size    = 500               # up to POPULATION_SIZE (2000)
 
 population_X, population_y, sample_X, sample_y, X_train, X_test, y_train, y_test = \
@@ -315,7 +316,7 @@ Random Forest is a learning algorithm that builds an ensemble of decision trees,
 
 ```{python}
 dataset_name      = "moons"   # "moons" | "circles" | "blobs" | "classification"
-sampling_strategy = "missing-region"  # "random" | "missing-region" | "axis-imbalanced" | "class-imbalanced"
+sampling_strategy = "random"  # "random" | "missing-region" | "axis-imbalanced" | "class-imbalanced"
 subsample_size    = 500       # up to POPULATION_SIZE (2000)
 population_X, population_y, sample_X, sample_y, X_train, X_test, y_train, y_test = \
     create_datasets(dataset_name, sampling_strategy, subsample_size)
@@ -353,8 +354,8 @@ print_metrics(
 Support Vector Classifiers is a model which maps data to a high-dimensional space and finds the hyperplane that best separates the classes. The `kernel` parameter controls the shape of the decision boundary: `linear` gives a straight line, while `rbf` (radial basis function) can capture more complex nonlinear boundaries. SVCs are sensitive to feature scaling, so we apply `StandardScaler` before training. This standardizes the features to have zero mean and unit variance, which can help the SVC learn a better decision boundary.
 
 ```{python}
-dataset_name      = "classification"   # "moons" | "circles" | "blobs" | "classification"
-sampling_strategy = "missing-region"  # "random" | "missing-region" | "axis-imbalanced" | "class-imbalanced"
+dataset_name      = "moons"   # "moons" | "circles" | "blobs" | "classification"
+sampling_strategy = "random"  # "random" | "missing-region" | "axis-imbalanced" | "class-imbalanced"
 subsample_size    = 500       # up to POPULATION_SIZE (2000)
 population_X, population_y, sample_X, sample_y, X_train, X_test, y_train, y_test = \
     create_datasets(dataset_name, sampling_strategy, subsample_size)
@@ -422,7 +423,7 @@ scatter2d((X_train_sub, y_train_sub, "Train subset"),
 
 ```{python}
 dataset_name      = "moons"   # "moons" | "circles" | "blobs" | "classification"
-sampling_strategy = "missing-region"  # "random" | "missing-region" | "axis-imbalanced" | "class-imbalanced"
+sampling_strategy = "random"  # "random" | "missing-region" | "axis-imbalanced" | "class-imbalanced"
 subsample_size    = 500       # up to POPULATION_SIZE (2000)
 population_X, population_y, sample_X, sample_y, X_train, X_test, y_train, y_test = \
     create_datasets(dataset_name, sampling_strategy, subsample_size)
