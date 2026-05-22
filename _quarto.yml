@@ -1,7 +1,0 @@
-project:
-  type: default
-  output-dir: notebooks
-
-format:
-  ipynb:
-    jupyter: python3

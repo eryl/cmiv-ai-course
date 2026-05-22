@@ -1,8 +1,0 @@
-# -*- yaml -*-
-# Render Jupyter notebooks
-project:
-  render:
-    - quarto_src/02-machine-learning-fundamentals.qmd
-    - quarto_src/03-neural-networks.qmd
-  post-render:  # Remove <!-- --> blocks and hide source_hidden blocks
-    - scripts/post-render.sh
