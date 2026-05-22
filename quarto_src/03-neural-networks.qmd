@@ -1,0 +1,1059 @@
+---
+title: "Neural Networks in PyTorch"
+description: Building, training, and tuning MLP classifiers.
+jupyter:
+  jupytext:
+    formats: ipynb,qmd
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.19.1
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+execute:
+  eval: false
+---
+
+This lab introduces neural networks as flexible, learnable classifiers. We build a Multi-Layer Perceptron (MLP) in PyTorch from scratch, train it with live loss curves and decision boundary plots, then systematically explore how network capacity, learning rate, and regularisation affect training dynamics and generalisation.
+
+**Learning outcomes:**
+
+- Build and train a small MLP in PyTorch
+- Understand overfitting and underfitting through live loss curves and decision boundary plots
+- Experiment with network capacity (width and depth) and learning rate to see their effect on training dynamics and final performance
+- Optional: add regularisation (weight decay, dropout, batch normalisation) and observe how it reduces overfitting
+
+## 0 - Setup
+
+This section contain code cells which we'll refer to later in the notebook. You don't have to read these code blocks. Just run them to set up the environment and helper functions.
+
+```{python}
+# Install dependencies if running on Colab
+import sys
+
+IN_COLAB = "google.colab" in sys.modules
+if IN_COLAB:
+    %pip install -q scikit-learn torch plotly ipywidgets
+    from google.colab import output
+    
+    output.enable_custom_widget_manager()
+```
+
+
+```{python}
+import math
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from sklearn import datasets
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, confusion_matrix
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+```
+
+
+### 0.1 - Scatter plot helper
+
+```{python}
+def _marker(y, size=5):
+    return dict(color=y.tolist(), colorscale="viridis",
+                line=dict(color="black", width=1), size=size)
+```
+
+```{python}
+def scatter2d(*datasets: tuple[np.ndarray, np.ndarray, str], **layout_kwargs):
+    """Single scatter or subplot grid depending on number of (X, y, title) tuples."""
+    if len(datasets) == 1:
+        X, y, name = datasets[0]
+        fig = go.Figure(go.Scatter(x=X[:, 0], y=X[:, 1], mode="markers", marker=_marker(y)))
+        fig.update_layout(title=name, yaxis_scaleanchor="x", showlegend=False, **layout_kwargs)
+    else:
+        cols = 2
+        rows = math.ceil(len(datasets) / cols)
+        fig = make_subplots(rows=rows, cols=cols,
+                            subplot_titles=[name for _, _, name in datasets])
+        for i, (X, y, name) in enumerate(datasets):
+            r, c = divmod(i, cols)
+            fig.add_scatter(x=X[:, 0], y=X[:, 1], mode="markers", marker=_marker(y),
+                            row=r + 1, col=c + 1)
+        fig.update_layout(showlegend=False, height=400 * rows, **layout_kwargs)
+    return fig
+```
+
+### 0.2 - Metrics helper
+
+```{python}
+def compute_metrics(y_true, y_pred, y_score):
+    """Return a dict of classification metrics. y_score should be the score for the positive class."""
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    return {
+        "Accuracy":    accuracy_score(y_true, y_pred),
+        "Sensitivity": tp / (tp + fn),
+        "Specificity": tn / (tn + fp),
+        "F1":          f1_score(y_true, y_pred),
+        "ROC AUC":     roc_auc_score(y_true, y_score),
+    }
+
+def print_metrics(**splits):
+    """Print a metric table. Keyword args map split name → (y_true, y_pred, y_score)."""
+    results = {name: compute_metrics(*args) for name, args in splits.items()}
+    keys = list(next(iter(results.values())).keys())
+    col_w = max(len(n) for n in results) + 2
+    header = f"{'Metric':<14}" + "".join(f"{n:>{col_w}}" for n in results)
+    print(header)
+    print("-" * len(header))
+    for k in keys:
+        print(f"{k:<14}" + "".join(f"{results[n][k]:>{col_w}.3f}" for n in results))
+```
+
+### 0.3 - Live training curve
+
+```{python}
+from typing import Optional
+
+class LivePlot:
+    """Interactive inline training-curve plot backed by Plotly FigureWidget."""
+
+    def __init__(self):
+        self.fig = go.FigureWidget()
+        self.fig.update_layout(showlegend=True)
+        self.plot_indices: dict[str, int] = {}
+        self.limits = [0, 0]
+        self.xs: dict[str, list] = {}
+        self.ys: dict[str, list] = {}
+        self.current_x = 0
+        display(self.fig)
+
+    def report(self, name: str, value: float):
+        """Append *value* to the line named *name* at the current time step."""
+        if name not in self.plot_indices:
+            plot_index = len(self.fig.data)
+            self.fig.add_scatter(y=[], x=[])
+            self.xs[name] = []
+            self.ys[name] = []
+            self.plot_indices[name] = plot_index
+
+        plot_index = self.plot_indices[name]
+        self.xs[name].append(self.current_x)
+        self.ys[name].append(value)
+        with self.fig.batch_update():
+            self.fig.data[plot_index].x = self.xs[name]
+            self.fig.data[plot_index].y = self.ys[name]
+            self.fig.data[plot_index].name = name
+
+    def increment(self, n_ticks: int):
+        """Extend the visible x-axis range by *n_ticks*."""
+        self.limits[1] += n_ticks
+        self.fig.update_layout(xaxis_range=self.limits)
+
+    def set_limit(self, n_ticks: int):
+        """Set the visible x-axis range to exactly *n_ticks*."""
+        self.limits[1] = n_ticks
+        self.fig.update_layout(xaxis_range=self.limits)
+
+    def tick(self, n_ticks: Optional[int] = None):
+        """Advance current time by *n_ticks* (default 1)."""
+        self.current_x += 1 if n_ticks is None else n_ticks
+```
+
+### 0.4 - Live decision boundary
+
+```{python}
+class LiveDecisionBoundary:
+    """Live decision boundary plot.
+
+    In Jupyter: uses FigureWidget for in-place z updates (no re-render).
+    In Colab: FigureWidget's kernel↔JS Comm protocol is unsupported, so falls
+    back to an ipywidgets.Output container + clear_output redraw.
+    """
+
+    def __init__(self, X_train, y_train, X_test, y_test, h=0.05):
+        X_all = np.vstack([X_train, X_test])
+        x_min, x_max = X_all[:, 0].min() - 0.5, X_all[:, 0].max() + 0.5
+        y_min, y_max = X_all[:, 1].min() - 0.5, X_all[:, 1].max() + 0.5
+        self.xx, self.yy = np.meshgrid(
+            np.arange(x_min, x_max, h), np.arange(y_min, y_max, h)
+        )
+        self.grid = np.c_[self.xx.ravel(), self.yy.ravel()]
+        _contour_kw = dict(x=self.xx[0], y=self.yy[:, 0], z=np.zeros(self.xx.shape),
+                           colorscale="viridis", opacity=0.4, showscale=False,
+                           contours=dict(coloring="fill"))
+        _axis = dict(showgrid=False, zeroline=False)
+
+        if IN_COLAB:
+            import ipywidgets as widgets
+            self._fig = make_subplots(rows=1, cols=2, subplot_titles=["Train", "Test"])
+        else:
+            self._fig = go.FigureWidget(
+                make_subplots(rows=1, cols=2, subplot_titles=["Train", "Test"])
+            )
+
+        self._fig.add_contour(**_contour_kw, row=1, col=1)
+        self._fig.add_scatter(x=X_train[:, 0], y=X_train[:, 1], mode="markers",
+                              marker=_marker(y_train), row=1, col=1)
+        self._fig.add_contour(**_contour_kw, row=1, col=2)
+        self._fig.add_scatter(x=X_test[:, 0], y=X_test[:, 1], mode="markers",
+                              marker=_marker(y_test), row=1, col=2)
+        self._fig.update_layout(showlegend=False, height=450)
+        self._fig.update_xaxes(**_axis)
+        self._fig.update_yaxes(**_axis, scaleanchor="x",  row=1, col=1)
+        self._fig.update_yaxes(**_axis, scaleanchor="x2", row=1, col=2)
+
+        if IN_COLAB:
+            self._out = widgets.Output()
+            display(self._out)
+            with self._out:
+                self._fig.show()
+        else:
+            display(self._fig)
+
+    def update(self, predict_fn):
+        """Redraw boundary. predict_fn: (n, 2) array in original space → (n,) class array."""
+        Z = predict_fn(self.grid).astype(float).reshape(self.xx.shape)
+        if IN_COLAB:
+            from IPython.display import clear_output
+            self._fig.data[0].z = Z
+            self._fig.data[2].z = Z
+            with self._out:
+                clear_output(wait=True)
+                self._fig.show()
+        else:
+            with self._fig.batch_update():
+                self._fig.data[0].z = Z
+                self._fig.data[2].z = Z
+```
+
+### 0.5 - Dataset and Data Split
+
+Same datasets and sampling strategies as in the previous notebook. Change `dataset_name`, `SAMPLING_STRATEGY`, and `subsample_size` in the cell below and re-run to explore different scenarios.
+
+```{python}
+RANDOM_STATE = 1729
+np.random.seed(RANDOM_STATE)
+torch.manual_seed(RANDOM_STATE)
+
+POPULATION_SIZE = 2000
+TEST_SIZE = 0.2   # held-out test points (absolute count)
+DEV_SIZE  = 0.2   # fraction of training data reserved for the development set
+
+def make_dataset(name: str = "moons", n_samples: int = 2000, noise: float = 0.2, random_state=1729):
+    """Return (X, y) for the chosen toy dataset."""
+    np.random.seed(random_state)
+    if name == "moons":
+        return datasets.make_moons(n_samples=n_samples, noise=noise, random_state=random_state)
+    elif name == "circles":
+        return datasets.make_circles(n_samples=n_samples, noise=noise, factor=0.5, random_state=random_state)
+    elif name == "blobs":
+        return datasets.make_blobs(n_samples=n_samples, centers=2, cluster_std=noise * 5, random_state=random_state)
+    elif name == "classification":
+        return datasets.make_classification(n_classes=2, n_samples=n_samples, n_features=2, n_redundant=0,
+                                            n_informative=2, n_clusters_per_class=2, random_state=random_state)
+    else:
+        raise ValueError(f"Unknown dataset: {name}")
+
+
+def _subsample(X, y, size, strategy, rng):
+    n = len(X)
+    if strategy == "random":
+        p = None
+    elif strategy == "centroid":
+        # one anchor point per class (near class mean); prob decays exponentially with distance
+        anchors = {cls: X[y == cls].mean(0) + rng.normal(0, 0.3, 2) for cls in np.unique(y)}
+        p = np.zeros(n)
+        for cls, anchor in anchors.items():
+            mask = y == cls
+            dist = np.linalg.norm(X[mask] - anchor, axis=1)
+            p[mask] = np.exp(-3 * dist)
+        p /= p.sum()
+    elif strategy == "axis-imbalanced":
+        # exponential decay along x-axis: left side sampled much more than right
+        t = (X[:, 0] - X[:, 0].min()) / (X[:, 0].max() - X[:, 0].min())
+        p = np.exp(-10 * t)
+        p /= p.sum()
+    elif strategy == "class-imbalanced":
+        classes = np.unique(y)
+        class_weight = {classes[0]: 10.0, classes[1]: 1.0}
+        p = np.array([class_weight[c] for c in y], dtype=float)
+        p /= p.sum()
+    else:
+        raise ValueError(f"Unknown strategy: {strategy!r}")
+    return rng.choice(n, size=size, replace=False, p=p)
+
+
+_population_cache = {}
+
+def create_datasets(dataset_name, sampling_strategy, subsample_size):
+    """Return a dict with population, sample, and train/test splits.
+
+    The population array is generated once per dataset_name and cached, so
+    switching sampling strategy or subsample size is cheap.
+
+    Returns: population_X, population_y, sample_X, sample_y, X_train, X_test, y_train, y_test
+    """
+    if dataset_name not in _population_cache:
+        _population_cache[dataset_name] = make_dataset(
+            dataset_name, n_samples=POPULATION_SIZE, random_state=RANDOM_STATE
+        )
+    population_X, population_y = _population_cache[dataset_name]
+
+    rng = np.random.default_rng(RANDOM_STATE)
+    indices = _subsample(population_X, population_y, subsample_size, sampling_strategy, rng)
+    sample_X, sample_y = population_X[indices], population_y[indices]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        sample_X, sample_y, test_size=TEST_SIZE, random_state=RANDOM_STATE
+    )
+    return population_X, population_y, sample_X, sample_y, X_train, X_test, y_train, y_test
+
+```
+
+## 1 - Building Your First MLP
+In this section we will build a simple Multi-Layer Perceptron (MLP) from scratch using PyTorch. An MLP is a type of feedforward neural network that consists of multiple layers of linear transformations followed by nonlinear activation functions. The architecture we will implement has two hidden layers with ReLU activations, and an output layer that produces a single logit for binary classification.
+
+This first cell creates the dataset we will you, and like in the previous lab you can try different datasets and samplings strategies by changing the `dataset_name` and `sampling_strategy` variables. The cell also visualizes the population, sampled points, and train/dev/test splits.
+
+```{python}
+dataset_name      = "moons"   # "moons" | "circles" | "blobs" | "classification"
+sampling_strategy = "random"  # "random" | "centroid" | "axis-imbalanced" | "class-imbalanced"
+subsample_size    = 500               # up to POPULATION_SIZE (2000)
+
+population_X, population_y, sample_X, sample_y, X_modelling, X_test, y_modelling, y_test = \
+    create_datasets(dataset_name, sampling_strategy, subsample_size)
+X_train_sub, X_dev, y_train_sub, y_dev = train_test_split(
+    X_modelling, y_modelling, test_size=DEV_SIZE, random_state=RANDOM_STATE
+)
+
+scatter2d(
+    (population_X, population_y, f"Population ({dataset_name})"),
+    (sample_X,     sample_y,     f"Sampled ({sampling_strategy}, n={subsample_size})"),
+    (X_train_sub,  y_train_sub,  "Train set"),
+    (X_dev,          y_dev,          "Dev set"),
+    (X_test,         y_test,         "Test set"),
+).show()
+```
+
+
+A **Multi-Layer Perceptron** stacks linear transformations and nonlinear activations:
+
+$$\mathbf{h}_1 = \text{ReLU}(W_1 \mathbf{x} + \mathbf{b}_1), \quad \mathbf{h}_2 = \text{ReLU}(W_2 \mathbf{h}_1 + \mathbf{b}_2), \quad \hat{y} = W_3 \mathbf{h}_2 + b_3$$
+
+Each `nn.Linear(in, out)` holds a weight matrix $W$ and bias $\mathbf{b}$ that are updated by gradient descent. `nn.ReLU` is the activation function $\text{ReLU}(z) = \max(0, z)$, cheap to compute and effective at preventing vanishing gradients. `nn.Sequential` chains these layers so a single `model(x)` call runs the full forward pass.
+
+### 1.1 Model definition
+
+```{python}
+class MLP(nn.Module):
+    def __init__(self, hidden_sizes: list[int] = [16, 16]):
+        super().__init__()
+        layers = []
+        in_size = 2
+        for h in hidden_sizes:
+            layers += [nn.Linear(in_size, h), nn.ReLU()]
+            in_size = h
+        layers.append(nn.Linear(in_size, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+```
+
+### 1.2 Training loop
+
+Training iterates over mini-batches. For each batch:
+
+1. **`optimizer.zero_grad()`**: clear gradients left from the previous step
+2. **`loss.backward()`**: compute gradients via backpropagation
+3. **`optimizer.step()`**: update every parameter by one gradient-descent step
+
+`BCEWithLogitsLoss` combines a sigmoid and binary cross-entropy in one numerically stable operation, so the model outputs raw logits (no sigmoid in `forward`).
+
+> **Note on reproducibility:** Even with fixed random seeds, re-running the training cell will give slightly different loss curves because mini-batch order is random each epoch. This is normal. The global seeds set at the top (`torch.manual_seed`, `np.random.seed`) make the *initial weights* reproducible, but stochasticity is inherent to SGD-based training.
+
+```{python}
+def prepare_tensors(X_tr, X_dev, X_te, y_tr, y_dev, y_te):
+    sc = StandardScaler().fit(X_tr)
+    to_t = lambda a: torch.tensor(a, dtype=torch.float32)
+    return (
+        to_t(sc.transform(X_tr)), to_t(sc.transform(X_dev)), to_t(sc.transform(X_te)),
+        to_t(y_tr), to_t(y_dev), to_t(y_te),
+        sc,
+    )
+
+Xt_train, Xt_dev, Xt_test, yt_train, yt_dev, yt_test, mlp_scaler = prepare_tensors(
+    X_train_sub, X_dev, X_test, y_train_sub, y_dev, y_test
+)
+train_loader = DataLoader(TensorDataset(Xt_train, yt_train), batch_size=32, shuffle=True)
+```
+
+`prepare_tensors` scales all three splits using a `StandardScaler` fit only on the training data, which prevents information from the dev or test sets from leaking into the scaling step. The `DataLoader` wraps the training tensors into shuffled mini-batches of 32 that the training loop will iterate over each epoch.
+
+Run the next cell to create the model and initialize the live plots.
+
+```{python}
+model     = MLP([16, 16])
+optimizer = optim.Adam(model.parameters(), lr=1e-2)
+criterion = nn.BCEWithLogitsLoss()
+
+n_params = sum(p.numel() for p in model.parameters())
+print(f"Model parameters: {n_params:,}")
+
+curve_mlp    = LivePlot()
+boundary_mlp = LiveDecisionBoundary(X_train_sub, y_train_sub, X_dev, y_dev)
+```
+
+The cell above created the model (and printed how many trainable parameters it has) and displayed two live plots (a loss curve and a decision boundary) that will update in place as training runs. Run the training cell below; you should see both plots refresh every few epochs. When training finishes the cell also prints a metrics summary.
+
+```{python}
+N_EPOCHS = 100
+for epoch in range(N_EPOCHS):
+    model.train()
+    train_loss = 0.0
+    for xb, yb in train_loader:
+        optimizer.zero_grad()
+        loss = criterion(model(xb), yb)
+        loss.backward()
+        optimizer.step()
+        train_loss += loss.item() * len(xb)
+    train_loss /= len(Xt_train)
+
+    model.eval()
+    with torch.no_grad():
+        dev_loss = criterion(model(Xt_dev), yt_dev).item()
+
+    if epoch % 5 == 0:
+        boundary_mlp.update(
+            lambda pts: model(torch.tensor(mlp_scaler.transform(pts), dtype=torch.float32))
+                        .sigmoid().detach().numpy() > 0.5
+        )
+
+    curve_mlp.tick()
+    curve_mlp.report("train loss", train_loss)
+    curve_mlp.report("dev loss",   dev_loss)
+
+# Final evaluation - only look at the test set once you are happy with the model.
+model.eval()
+with torch.no_grad():
+    train_score = model(Xt_train).sigmoid().numpy()
+    dev_score   = model(Xt_dev).sigmoid().numpy()
+    test_score  = model(Xt_test).sigmoid().numpy()
+train_pred = (train_score > 0.5).astype(int)
+dev_pred   = (dev_score   > 0.5).astype(int)
+test_pred  = (test_score  > 0.5).astype(int)
+
+print_metrics(
+    Train=(y_train_sub, train_pred, train_score),
+    Dev  =(y_dev,       dev_pred,   dev_score),
+    Test =(y_test,      test_pred,  test_score),
+)
+```
+
+## 2 - Network Capacity: Width and Depth
+
+*Capacity* is the family of functions a network can represent. More neurons (wider) or more layers (deeper) increases capacity, but too much capacity on too little data leads to overfitting.
+
+> **Exercise:** Before running, predict: which configuration will underfit? Which will overfit? Write down your reasoning, then run the cell and check. Compare the decision boundaries and train/dev loss gaps: does the gap widen or narrow as capacity increases? Why?
+
+```{python}
+def train_mlp(hidden_sizes, X_train, X_dev, X_test, y_train, y_dev, y_test,
+              n_epochs=80, lr=1e-2, optimizer_name="adam",
+              snapshot_grid=None, snapshot_every=None):
+    """Train an MLP and return (train_losses, dev_losses, predict_fn, extras).
+
+    optimizer_name: "adam" or "sgd" (SGD with momentum=0.9)
+    snapshot_grid:  (N, 2) array in original (unscaled) space; scaled internally.
+    snapshot_every: capture a boundary snapshot every this many epochs (and at the last).
+                    extras["snapshots"] is a list of (epoch, Z_flat) arrays.
+    extras is an empty dict when no snapshot params are given.
+    """
+    Xt_tr, Xt_dv, Xt_te, yt_tr, yt_dv, yt_te, sc = prepare_tensors(
+        X_train, X_dev, X_test, y_train, y_dev, y_test
+    )
+    loader = DataLoader(TensorDataset(Xt_tr, yt_tr), batch_size=32, shuffle=True)
+    model = MLP(hidden_sizes)
+    crit = nn.BCEWithLogitsLoss()
+    if optimizer_name == "adam":
+        opt = optim.Adam(model.parameters(), lr=lr)
+    elif optimizer_name == "sgd":
+        opt = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer_name!r}")
+
+    do_snapshots = snapshot_grid is not None and snapshot_every is not None
+    if do_snapshots:
+        grid_t = torch.tensor(sc.transform(snapshot_grid), dtype=torch.float32)
+        snapshots = []
+
+    train_losses, dev_losses = [], []
+    for epoch in range(n_epochs):
+        model.train()
+        epoch_loss = 0.0
+        for xb, yb in loader:
+            opt.zero_grad()
+            loss = crit(model(xb), yb)
+            loss.backward()
+            opt.step()
+            epoch_loss += loss.item() * len(xb)
+        model.eval()
+        with torch.no_grad():
+            dev_loss = crit(model(Xt_dv), yt_dv).item()
+        train_losses.append(epoch_loss / len(Xt_tr))
+        dev_losses.append(dev_loss)
+
+        if do_snapshots and (epoch % snapshot_every == 0 or epoch == n_epochs - 1):
+            with torch.no_grad():
+                Z = (model(grid_t).sigmoid().numpy() > 0.5).astype(float)
+            snapshots.append((epoch, Z))
+
+    def predict_fn(pts):
+        t = torch.tensor(sc.transform(pts), dtype=torch.float32)
+        with torch.no_grad():
+            return model(t).sigmoid().numpy() > 0.5
+
+    def score_fn(pts):
+        t = torch.tensor(sc.transform(pts), dtype=torch.float32)
+        with torch.no_grad():
+            return model(t).sigmoid().numpy()
+
+    extras = {"score_fn": score_fn}
+    if do_snapshots:
+        extras["snapshots"] = snapshots
+    return train_losses, dev_losses, predict_fn, extras
+```
+
+`train_mlp` wraps the full training pipeline into a single function call so we can compare multiple configurations without duplicating code. The next cell trains one model for each capacity configuration; this may take a few seconds per model.
+
+```{python}
+configs = {
+    "Tiny [2]":          [2],
+    "Small [16, 16]":    [16, 16],
+    "Medium [64, 64]":   [64, 64],
+    "Large [256,256,256]": [256, 256, 256],
+}
+
+results = {}
+for label, sizes in configs.items():
+    print(f"Training {label}...")
+    results[label] = train_mlp(sizes, X_train_sub, X_dev, X_test, y_train_sub, y_dev, y_test)
+```
+
+Training complete. The next cell overlays train and dev loss for all four configurations on the same axes. Solid lines are training loss; dashed lines are dev loss. A widening gap between the two lines is the hallmark of overfitting.
+
+```{python}
+# Loss curves for all configurations
+fig = go.Figure()
+colors = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA"]
+for (label, (tr, dv, _, _)), color in zip(results.items(), colors):
+    epochs = list(range(len(tr)))
+    fig.add_scatter(x=epochs, y=tr, name=f"{label} train", line=dict(color=color))
+    fig.add_scatter(x=epochs, y=dv, name=f"{label} dev",   line=dict(color=color, dash="dash"))
+fig.update_layout(title="Train vs Dev Loss by Capacity",
+                  xaxis_title="Epoch", yaxis_title="Loss")
+fig.show()
+```
+
+The metrics table below prints accuracy, sensitivity, specificity, F1, and ROC AUC for every configuration across all three splits. A model that scores well on train but poorly on dev or test is overfitting.
+
+```{python}
+# Metrics for each capacity configuration
+for label, (_, _, _, extras) in results.items():
+    sf = extras["score_fn"]
+    tr_sc = sf(X_train_sub)
+    dv_sc = sf(X_dev)
+    te_sc = sf(X_test)
+    print(f"=== {label} ===")
+    print_metrics(
+        Train=(y_train_sub, (tr_sc > 0.5).astype(int), tr_sc),
+        Dev  =(y_dev,       (dv_sc > 0.5).astype(int), dv_sc),
+        Test =(y_test,      (te_sc > 0.5).astype(int), te_sc),
+    )
+    print()
+```
+
+The decision boundary plots below make the difference in learned functions visible. A tiny network can only draw a simple boundary; a large network may wrap tightly around individual training points in a way that does not generalise.
+
+```{python}
+# Decision boundaries side by side
+cols = 2
+rows = math.ceil(len(configs) / cols)
+labels = list(configs.keys())
+fig2 = make_subplots(rows=rows, cols=cols, subplot_titles=labels)
+
+grid_all = np.vstack([X_train, X_test])
+x_min, x_max = grid_all[:, 0].min() - 0.5, grid_all[:, 0].max() + 0.5
+y_min, y_max = grid_all[:, 1].min() - 0.5, grid_all[:, 1].max() + 0.5
+xx, yy = np.meshgrid(np.arange(x_min, x_max, 0.05), np.arange(y_min, y_max, 0.05))
+grid = np.c_[xx.ravel(), yy.ravel()]
+
+for i, label in enumerate(labels):
+    r, c = divmod(i, cols)
+    _, _, predict_fn, _ = results[label]
+    Z = predict_fn(grid).astype(float).reshape(xx.shape)
+    fig2.add_contour(x=xx[0], y=yy[:, 0], z=Z, colorscale="viridis", opacity=0.4,
+                     showscale=False, contours=dict(coloring="fill"), row=r+1, col=c+1)
+    fig2.add_scatter(x=X_dev[:, 0], y=X_dev[:, 1], mode="markers",
+                     marker=_marker(y_dev, size=4), row=r+1, col=c+1)
+
+fig2.update_layout(showlegend=False, height=500 * rows,
+                   title="Decision Boundaries by Capacity (dev set)")
+fig2.show()
+```
+
+
+## 3 - Learning Rate and Optimizer
+
+The **learning rate** controls the step size taken at each gradient update. A rate that is too small gives slow convergence; too large and the loss oscillates or diverges.
+
+> **Exercise:** Before running, predict: will a larger learning rate always converge faster? Run the cell and check. Then add `5.0` to the list: what happens to the loss curve, and why?
+
+```{python}
+learning_rates = [1e-4, 1e-3, 1e-2, 0.1]
+lr_n_epochs = 800
+MLP_SIZES = [64, 64]
+snapshot_every = 20
+
+# Build the boundary grid once - passed to train_mlp and reused for the animation.
+_bd_all = np.vstack([X_train_sub, X_dev])
+_x_min, _x_max = _bd_all[:, 0].min() - 0.5, _bd_all[:, 0].max() + 0.5
+_y_min, _y_max = _bd_all[:, 1].min() - 0.5, _bd_all[:, 1].max() + 0.5
+xx_lr, yy_lr = np.meshgrid(np.arange(_x_min, _x_max, 0.05), np.arange(_y_min, _y_max, 0.05))
+grid_lr = np.c_[xx_lr.ravel(), yy_lr.ravel()]
+
+lr_results   = {}
+lr_snapshots = {}   # lr -> list of (epoch, Z_flat)
+
+for lr in learning_rates:
+    print(f"Training lr={lr}...")
+    tr, dv, predict_fn, extras = train_mlp(
+        MLP_SIZES, X_train_sub, X_dev, X_test, y_train_sub, y_dev, y_test,
+        n_epochs=lr_n_epochs, lr=lr,
+        snapshot_grid=grid_lr, snapshot_every=snapshot_every,
+    )
+    lr_results[lr]   = (tr, dv, predict_fn, extras)
+    lr_snapshots[lr] = extras["snapshots"]
+```
+
+All four models are trained for 800 epochs each. The loss curves below use a log scale on the y-axis so that differences between learning rates spanning several orders of magnitude are easy to compare.
+
+```{python}
+fig = make_subplots(rows=1, cols=2, subplot_titles=["Train Loss", "Dev Loss"])
+colors = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA"]
+for (lr, (tr, dv, _, _)), color in zip(lr_results.items(), colors):
+    epochs = list(range(len(tr)))
+    fig.add_scatter(x=epochs, y=tr, name=f"lr={lr}", line=dict(color=color), row=1, col=1)
+    fig.add_scatter(x=epochs, y=dv, name=f"lr={lr}", line=dict(color=color),
+                    showlegend=False, row=1, col=2)
+fig.update_layout(title="Effect of Learning Rate", height=400,
+                  yaxis_type="log", yaxis2_type="log")
+fig.show()
+```
+
+The metrics table below shows final performance for each learning rate after all epochs have run.
+
+```{python}
+# Metrics for each learning rate
+for lr, (_, _, _, extras) in lr_results.items():
+    sf = extras["score_fn"]
+    tr_sc = sf(X_train_sub)
+    dv_sc = sf(X_dev)
+    te_sc = sf(X_test)
+    print(f"=== lr={lr} ===")
+    print_metrics(
+        Train=(y_train_sub, (tr_sc > 0.5).astype(int), tr_sc),
+        Dev  =(y_dev,       (dv_sc > 0.5).astype(int), dv_sc),
+        Test =(y_test,      (te_sc > 0.5).astype(int), te_sc),
+    )
+    print()
+```
+
+The animated plot below shows how the decision boundary evolved during training for each learning rate. Press **▶ Play** or drag the epoch slider to scrub through time. Notice how quickly each learning rate settles into a stable boundary. A very small learning rate may not have converged at all by epoch 800.
+
+```{python}
+# Animated decision boundary - scrub through training with the slider or press Play.
+snap_epochs    = [ep for ep, _ in lr_snapshots[learning_rates[0]]]
+lr_labels      = [f"lr={lr}" for lr in learning_rates]
+n_lr           = len(learning_rates)
+cols           = 2
+rows           = math.ceil(n_lr / cols)
+
+fig_lr_bd = make_subplots(rows=rows, cols=cols, subplot_titles=lr_labels)
+
+# Base traces: epoch-0 contour + static scatter per subplot.
+for i, lr in enumerate(learning_rates):
+    r, c = divmod(i, cols)
+    fig_lr_bd.add_contour(x=xx_lr[0], y=yy_lr[:, 0], z=lr_snapshots[lr][0][1].reshape(xx_lr.shape),
+                          colorscale="viridis", opacity=0.4, showscale=False,
+                          contours=dict(coloring="fill"), row=r+1, col=c+1)
+    fig_lr_bd.add_scatter(x=X_dev[:, 0], y=X_dev[:, 1], mode="markers",
+                          marker=_marker(y_dev, size=4), row=r+1, col=c+1)
+
+# Contour traces are at even indices; scatter traces sit between them and are static.
+contour_ids = list(range(0, 2 * n_lr, 2))
+
+fig_lr_bd.frames = [
+    go.Frame(
+        data=[go.Contour(z=lr_snapshots[lr][snap_idx][1].reshape(xx_lr.shape))
+              for lr in learning_rates],
+        traces=contour_ids,
+        name=str(epoch),
+    )
+    for snap_idx, epoch in enumerate(snap_epochs)
+]
+
+fig_lr_bd.update_layout(
+    showlegend=False,
+    height=500 * rows,
+    title="Decision Boundary Evolution by Learning Rate",
+    updatemenus=[dict(
+        type="buttons",
+        showactive=False,
+        x=0.5, xanchor="center",
+        y=0.0, yanchor="top",
+        buttons=[
+            dict(label="▶ Play", method="animate",
+                 args=[None, dict(frame=dict(duration=150, redraw=True), fromcurrent=True)]),
+            dict(label="⏸ Pause", method="animate",
+                 args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")]),
+        ],
+    )],
+    sliders=[dict(
+        active=0,
+        currentvalue=dict(prefix="Epoch: ", visible=True),
+        steps=[
+            dict(label=str(ep), method="animate",
+                 args=[[str(ep)], dict(mode="immediate", frame=dict(duration=0, redraw=True))])
+            for ep in snap_epochs
+        ],
+    )],
+)
+fig_lr_bd.show()
+```
+
+
+**Adam vs SGD with momentum.** Adam adapts the learning rate per parameter, which often works well out of the box. SGD with momentum is simpler and can generalise slightly better with careful tuning.
+
+> **Exercise:** Change `optimizer_name` below and compare convergence speed and final test loss.
+
+```{python}
+MLP_SIZES = [64, 64]
+opt_results = {}
+for opt_name in ["adam", "sgd"]:
+    print(f"Training with {opt_name}...")
+    opt_results[opt_name] = train_mlp(MLP_SIZES, X_train_sub, X_dev, X_test,
+                                      y_train_sub, y_dev, y_test,
+                                      n_epochs=500, lr=1e-2, optimizer_name=opt_name)
+```
+
+Both optimizers are now trained for 500 epochs at the same learning rate. The next cell overlays their loss curves. Look at how quickly each one converges and how smooth the curves are.
+
+```{python}
+fig = go.Figure()
+for opt_name, (tr, dv, _, _) in opt_results.items():
+    epochs = list(range(len(tr)))
+    fig.add_scatter(x=epochs, y=tr, name=f"{opt_name} train")
+    fig.add_scatter(x=epochs, y=dv, name=f"{opt_name} dev", line=dict(dash="dash"))
+fig.update_layout(title="Adam vs SGD+Momentum", xaxis_title="Epoch", yaxis_title="Loss")
+fig.show()
+```
+
+The metrics table below gives a quantitative comparison of both optimizers across all three splits. Similar final loss does not always translate to identical performance across all metrics.
+
+```{python}
+# Metrics for each optimizer
+for opt_name, (_, _, _, extras) in opt_results.items():
+    sf = extras["score_fn"]
+    tr_sc = sf(X_train_sub)
+    dv_sc = sf(X_dev)
+    te_sc = sf(X_test)
+    print(f"=== {opt_name} ===")
+    print_metrics(
+        Train=(y_train_sub, (tr_sc > 0.5).astype(int), tr_sc),
+        Dev  =(y_dev,       (dv_sc > 0.5).astype(int), dv_sc),
+        Test =(y_test,      (te_sc > 0.5).astype(int), te_sc),
+    )
+    print()
+```
+
+The decision boundary plots below show whether both optimizers converged to the same solution in feature space. Two models can achieve similar accuracy while drawing their boundaries in very different places.
+
+```{python}
+# Side-by-side decision boundaries - do both optimizers find the same solution?
+fig_opt_bd = make_subplots(rows=1, cols=2, subplot_titles=list(opt_results.keys()))
+
+grid_all = np.vstack([X_train_sub, X_dev])
+x_min, x_max = grid_all[:, 0].min() - 0.5, grid_all[:, 0].max() + 0.5
+y_min, y_max = grid_all[:, 1].min() - 0.5, grid_all[:, 1].max() + 0.5
+xx_opt, yy_opt = np.meshgrid(np.arange(x_min, x_max, 0.05), np.arange(y_min, y_max, 0.05))
+grid_opt = np.c_[xx_opt.ravel(), yy_opt.ravel()]
+
+for i, (opt_name, (_, __, predict_fn, ___)) in enumerate(opt_results.items()):
+    Z = predict_fn(grid_opt).astype(float).reshape(xx_opt.shape)
+    fig_opt_bd.add_contour(x=xx_opt[0], y=yy_opt[:, 0], z=Z, colorscale="viridis", opacity=0.4,
+                           showscale=False, contours=dict(coloring="fill"), row=1, col=i+1)
+    fig_opt_bd.add_scatter(x=X_dev[:, 0], y=X_dev[:, 1], mode="markers",
+                           marker=_marker(y_dev, size=4), row=1, col=i+1)
+
+fig_opt_bd.update_layout(showlegend=False, height=450,
+                         title="Decision Boundaries: Adam vs SGD+Momentum (dev set)")
+fig_opt_bd.show()
+```
+
+
+
+## 4 - Overfitting and How to Fight It *(Optional)*
+
+When a large network memorises the training data instead of learning the underlying pattern, it **overfits**: training loss is low but test loss is high. Three standard tools push back against this:
+
+| Technique | How it helps |
+|-----------|-------------|
+| **Weight decay** (`l2_lambda`) | Penalises large weights; encourages simpler functions |
+| **Dropout** | Randomly zeros activations during training; forces redundant representations |
+| **Batch normalisation** | Stabilises activations; acts as implicit regulariser |
+
+> **Important: training vs evaluation mode.** Dropout and BatchNorm behave differently during training and inference. `model.train()` enables dropout masking and uses batch statistics; `model.eval()` disables dropout and uses running statistics. You will see both calls in the training loop below; always switch modes at the right point, or your results will be wrong.
+
+> **Exercise:** Start with `use_dropout=False`, `use_batchnorm=False`, `weight_decay=0`. Confirm the large model overfits (wide train/dev gap). Then enable each technique one at a time and observe how the gap changes. Which technique helps most on this dataset?
+
+```{python}
+class RegMLP(nn.Module):
+    def __init__(self, hidden_sizes: list[int], use_dropout: bool = False,
+                 use_batchnorm: bool = False, dropout_p: float = 0.5):
+        super().__init__()
+        layers = []
+        in_size = 2
+        for h in hidden_sizes:
+            layers.append(nn.Linear(in_size, h))
+            if use_batchnorm:
+                layers.append(nn.BatchNorm1d(h))
+            layers.append(nn.ReLU())
+            if use_dropout:
+                layers.append(nn.Dropout(dropout_p))
+            in_size = h
+        layers.append(nn.Linear(in_size, 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x).squeeze(-1)
+```
+
+`RegMLP` extends `MLP` with optional batch normalization and dropout layers inserted after each hidden layer. Change the flags in the next cell and re-run it to switch regularization on or off; the model, optimizer, and data loaders are all recreated each time so you always start from a fresh initialization.
+
+```{python}
+use_dropout  = False   # try True
+use_batchnorm = False   # try True
+weight_decay  = 0.0  # try 0.001, 0.01 and 0.1
+MLP_SIZES = [256, 256, 256]
+
+Xt_tr, Xt_dv, Xt_te, yt_tr, yt_dv, yt_te, sc_reg = prepare_tensors(
+    X_train_sub, X_dev, X_test, y_train_sub, y_dev, y_test
+)
+loader_reg = DataLoader(TensorDataset(Xt_tr, yt_tr), batch_size=32, shuffle=True)
+
+reg_model = RegMLP(MLP_SIZES, use_dropout=use_dropout, use_batchnorm=use_batchnorm)
+reg_opt   = optim.Adam(reg_model.parameters(), lr=1e-2, weight_decay=weight_decay)
+crit      = nn.BCEWithLogitsLoss()
+
+curve_reg    = LivePlot()
+boundary_reg = LiveDecisionBoundary(X_train_sub, y_train_sub, X_dev, y_dev)
+```
+
+The model and live plots are ready. Run the training cell below; the loss curve and decision boundary will update every 10 epochs. When training finishes the cell prints a metrics summary. Watch whether the train/dev gap is wide (overfitting) or narrow (good generalization), then go back and change the regularization flags to see how the gap responds.
+
+```{python}
+N_EPOCHS = 100
+for epoch in range(N_EPOCHS):
+    reg_model.train()
+    train_loss = 0.0
+    for xb, yb in loader_reg:
+        reg_opt.zero_grad()
+        loss = crit(reg_model(xb), yb)
+        loss.backward()
+        reg_opt.step()
+        train_loss += loss.item() * len(xb)
+    train_loss /= len(Xt_tr)
+
+    reg_model.eval()
+    with torch.no_grad():
+        dev_loss = crit(reg_model(Xt_dv), yt_dv).item()
+
+    if epoch % 10 == 0:
+        boundary_reg.update(
+            lambda pts: reg_model(torch.tensor(sc_reg.transform(pts), dtype=torch.float32))
+                        .sigmoid().detach().numpy() > 0.5
+        )
+
+    curve_reg.tick()
+    curve_reg.report("train loss", train_loss)
+    curve_reg.report("dev loss",   dev_loss)
+
+# Final evaluation - only look at the test set once you are happy with the model.
+reg_model.eval()
+with torch.no_grad():
+    train_score = reg_model(Xt_tr).sigmoid().numpy()
+    dev_score   = reg_model(Xt_dv).sigmoid().numpy()
+    test_score  = reg_model(Xt_te).sigmoid().numpy()
+
+print_metrics(
+    Train=(y_train_sub, (train_score > 0.5).astype(int), train_score),
+    Dev  =(y_dev,       (dev_score   > 0.5).astype(int), dev_score),
+    Test =(y_test,      (test_score  > 0.5).astype(int), test_score),
+)
+```
+
+### Early stopping
+
+The training loop above always runs for exactly `N_EPOCHS`. In practice, dev loss often starts rising before training loss does, which means the model has started memorising rather than generalising. **Early stopping** halts training when the dev loss stops improving and keeps the weights from the best epoch instead.
+
+The cells below implement this on the same model configuration you set above, so first make sure the regularisation cell has been run (or is set to defaults). The key idea is to save a snapshot of the weights whenever dev loss improves, then restore that snapshot after training ends.
+
+```{python}
+import copy
+
+N_EPOCHS_ES      = 300   # run long enough to see the dev loss diverge
+patience         = 50    # stop if dev loss has not improved for this many consecutive epochs
+MLP_SIZES_ES     = [256, 256, 256]
+
+es_model = RegMLP(MLP_SIZES_ES, use_dropout=use_dropout, use_batchnorm=use_batchnorm)
+es_opt   = optim.Adam(es_model.parameters(), lr=1e-3, weight_decay=weight_decay)
+
+best_dev_loss      = float("inf")
+best_weights       = copy.deepcopy(es_model.state_dict())
+best_epoch         = 0
+epochs_no_improve  = 0
+
+es_train_losses, es_dev_losses = [], []
+
+for epoch in range(N_EPOCHS_ES):
+    es_model.train()
+    train_loss = 0.0
+    for xb, yb in loader_reg:
+        es_opt.zero_grad()
+        loss = crit(es_model(xb), yb)
+        loss.backward()
+        es_opt.step()
+        train_loss += loss.item() * len(xb)
+    train_loss /= len(Xt_tr)
+
+    es_model.eval()
+    with torch.no_grad():
+        dev_loss = crit(es_model(Xt_dv), yt_dv).item()
+
+    es_train_losses.append(train_loss)
+    es_dev_losses.append(dev_loss)
+
+    if dev_loss < best_dev_loss:
+        best_dev_loss     = dev_loss
+        best_weights      = copy.deepcopy(es_model.state_dict())
+        best_epoch        = epoch
+        epochs_no_improve = 0
+    else:
+        epochs_no_improve += 1
+        if epochs_no_improve >= patience:
+            print(f"Early stop at epoch {epoch}  |  best epoch: {best_epoch}  |  best dev loss: {best_dev_loss:.4f}")
+            break
+
+# Build a second model with the saved best weights for comparison
+best_model = RegMLP(MLP_SIZES_ES, use_dropout=use_dropout, use_batchnorm=use_batchnorm)
+best_model.load_state_dict(best_weights)
+best_model.eval()
+```
+
+Training has finished. `best_model` now holds the weights from the epoch where dev loss was lowest; `es_model` holds the weights from the final epoch (which may have overfit). The next cell plots both loss curves with a dashed red marker at the best epoch so you can see exactly when the model was at its best.
+
+```{python}
+# Loss curves with a marker at the best epoch
+fig_es = go.Figure()
+ep_axis = list(range(len(es_train_losses)))
+fig_es.add_scatter(x=ep_axis, y=es_train_losses, name="train loss")
+fig_es.add_scatter(x=ep_axis, y=es_dev_losses,   name="dev loss")
+fig_es.add_vline(x=best_epoch, line_dash="dash", line_color="red",
+                 annotation_text=f"best epoch ({best_epoch})",
+                 annotation_position="top right")
+fig_es.update_layout(title="Early Stopping - Loss Curves",
+                     xaxis_title="Epoch", yaxis_title="Loss")
+fig_es.show()
+```
+
+The dashed red line marks the epoch where `best_model`'s weights were saved. The next cell prints the full metrics table for both models side by side so you can quantify how much stopping early actually helped.
+
+```{python}
+# Compare metrics: final (potentially overfit) model vs best-epoch model
+def _scores(m):
+    m.eval()
+    with torch.no_grad():
+        return (m(Xt_tr).sigmoid().numpy(),
+                m(Xt_dv).sigmoid().numpy(),
+                m(Xt_te).sigmoid().numpy())
+
+final_tr, final_dv, final_te = _scores(es_model)
+best_tr,  best_dv,  best_te  = _scores(best_model)
+
+print(f"Final model (epoch {len(es_train_losses) - 1}):")
+print_metrics(
+    Train=(y_train_sub, (final_tr > 0.5).astype(int), final_tr),
+    Dev  =(y_dev,       (final_dv > 0.5).astype(int), final_dv),
+    Test =(y_test,      (final_te > 0.5).astype(int), final_te),
+)
+print()
+print(f"Best model (epoch {best_epoch}):")
+print_metrics(
+    Train=(y_train_sub, (best_tr > 0.5).astype(int), best_tr),
+    Dev  =(y_dev,       (best_dv > 0.5).astype(int), best_dv),
+    Test =(y_test,      (best_te > 0.5).astype(int), best_te),
+)
+```
+
+The side-by-side boundary plot below shows the same comparison in feature space. A model that has overfit often produces a more fragmented or jagged boundary; the best-epoch model should look smoother and more generalizable.
+
+```{python}
+# Decision boundaries: do the two models look different?
+_bd = np.vstack([X_train_sub, X_dev])
+_xm, _xx = _bd[:, 0].min() - 0.5, _bd[:, 0].max() + 0.5
+_ym, _yx = _bd[:, 1].min() - 0.5, _bd[:, 1].max() + 0.5
+xx_es, yy_es = np.meshgrid(np.arange(_xm, _xx, 0.05), np.arange(_ym, _yx, 0.05))
+grid_es_t = torch.tensor(sc_reg.transform(np.c_[xx_es.ravel(), yy_es.ravel()]),
+                          dtype=torch.float32)
+
+final_epoch = len(es_train_losses) - 1
+fig_es_bd = make_subplots(
+    rows=1, cols=2,
+    subplot_titles=[f"Final model (epoch {final_epoch})", f"Best model (epoch {best_epoch})"],
+)
+for col, m in enumerate([es_model, best_model], start=1):
+    with torch.no_grad():
+        Z = (m(grid_es_t).sigmoid().numpy() > 0.5).astype(float).reshape(xx_es.shape)
+    fig_es_bd.add_contour(x=xx_es[0], y=yy_es[:, 0], z=Z, colorscale="viridis", opacity=0.4,
+                          showscale=False, contours=dict(coloring="fill"), row=1, col=col)
+    fig_es_bd.add_scatter(x=X_dev[:, 0], y=X_dev[:, 1], mode="markers",
+                          marker=_marker(y_dev, size=4), row=1, col=col)
+
+fig_es_bd.update_layout(showlegend=False, height=450,
+                        title="Decision Boundaries: Final vs Best-Epoch Model")
+fig_es_bd.show()
+```
+
+> **What to look for:** With no regularisation (`use_dropout=False`, `use_batchnorm=False`, `weight_decay=0`), the final model should show a more jagged boundary than the best-epoch model, and its dev/test metrics should be worse. Enabling regularisation before running this section will reduce the gap, or eliminate it entirely.
+
+## Summary
+
+| Concept | Key takeaway | 
+|---------|-------------|
+ MLP | Stacks linear layers + ReLU activations; `nn.Sequential` chains them |
+| Training loop | `zero_grad`, `backward`, `step` each mini-batch | 
+| train/eval mode | `model.train()` enables dropout/batchnorm training behaviour; `model.eval()` disables it | 
+| Capacity | Width/depth control what the network can represent; too much leads to overfitting | 
+| Train/dev/test split | Train subset used for gradient updates; dev set used to monitor training and tune hyperparameters; test set touched only for final evaluation | 
+| Learning curves | Train/dev gap is the primary signal for over- and underfitting | 
+| Learning rate | Too small: slow convergence. Too large: instability. Adam adapts per-parameter | 
+| Weight decay | L2 penalty on weights; reduces overfitting by keeping weights small | 
+| Dropout | Random activation masking; forces robust, distributed representations | 
+| Batch norm | Normalises layer inputs; stabilises training and acts as regulariser | 
+| Early stopping | Halt at best dev-loss epoch; restore saved weights for free regularisation | 

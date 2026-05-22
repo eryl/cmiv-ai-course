@@ -13,12 +13,13 @@ The notebooks are targeted towards users with little or no prior experience from
 
 ## Running with Colab
 You can run all notebooks directly from the Github repo by clicking the links below:
-* [Artificial Neural Networks](https://colab.research.google.com/github/k-stacke/cmiv-ai-course/blob/master/notebooks/06%20-%20Artificial%20Neural%20Networks.ipynb)
+* [Machine Learning Fundamentals](https://colab.research.google.com/github/k-stacke/cmiv-ai-course/blob/master/notebooks/02-machine-learning-fundamentals.ipynb)
+* [Artificial Neural Networks](https://colab.research.google.com/github/k-stacke/cmiv-ai-course/blob/master/notebooks/03-neural-networks.ipynb)
 * [Fine-tuning Pre-trained Models - Radiology](https://colab.research.google.com/github/k-stacke/cmiv-ai-course/blob/master/notebooks/09%20-%20Fine-tuning%20Pre-trained%20Models%20-%20Radiology.ipynb)
 * [LLM Prompting](https://colab.research.google.com/github/k-stacke/cmiv-ai-course/blob/master/notebooks/10%20-%20LLM_Prompting.ipynb)
 
 Note that this requires a Google account to sign in to Google Colaboratory.
 
-Note that these notebooks were originally written for a Jupyter Notebook environment. We have madae some adjustments to allow them to be run in Google Colab, however, Google Colab uses a fork of Jupyter Notebooks and as such there will be some discrepancies between the content of the notebooks and the runtime environment in Google Colab.
+Note that these notebooks were originally written for a Jupyter Notebook environment. We have made some adjustments to allow them to be run in Google Colab, however, Google Colab uses a fork of Jupyter Notebooks and as such there will be some discrepancies between the content of the notebooks and the runtime environment in Google Colab.
 
 Remember to change change runtime environment to GPU for the deep learning parts.
