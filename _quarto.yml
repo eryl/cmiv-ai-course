@@ -1,6 +1,6 @@
 project:
   type: default
-  output-dir: rendered
+  output-dir: notebooks
 
 format:
   ipynb:
