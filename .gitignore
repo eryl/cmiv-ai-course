@@ -1,5 +1,6 @@
 notebooks/.ipynb_checkpoints
 notebooks/figures/__pycache__
+notebooks/.quarto/
 data
 /.quarto/
 **/*.quarto_ipynb
