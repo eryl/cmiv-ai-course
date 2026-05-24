@@ -17,6 +17,9 @@ scikit-learn = "*"
 plotly = ">=6.6.0,<7"
 anywidget = ">=0.11.0,<0.12"
 
+[feature.manim.dependencies]
+manim = ">=0.20.1,<0.21"
+
 
 # Default (CPU / generic) torch 
 [feature.torch.pypi-dependencies]
@@ -44,6 +47,7 @@ quarto = "*"
 default = ["torch"]
 local-amd = ["rocm"]
 quarto = ["quarto"]
+manim = ["manim", "torch"]
 
 [tasks.render]
 cmd = "make"
